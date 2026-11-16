@@ -1,18 +1,19 @@
-// Chat Spikes page: talks to the local Python server over Server-Sent Events.
+// Chat Spikes (finished streams): reads the analysis from the local Python server.
 const $ = (id) => document.getElementById(id);
-const form = $("form"), btn = $("btn"), status = $("status");
-const MAX_BARS = 60;   // 60 x 10 s = last 10 minutes on the chart
-const MAX_CHAT = 150;
+const form = $("form"), btn = $("btn");
+const MAX_BARS = 480; // the chart groups windows so it never draws more bars than this
 
-let es = null, windows = [], msgCount = 0, rules = { window: 10 }, currentVid = null;
+let es = null, vid = null, duration = 0, rules = { window: 10 };
+let windows = [];   // [start, score, messages, people, normal, spike]
+let moments = [];   // from the server, biggest first
+let sortBy = "score", selected = null;
 
-// Stream time: how far into the stream (h:mm:ss), the same time you see on YouTube's player.
 const clock = (sec) => {
   const s = Math.max(0, Math.floor(sec));
   return `${Math.floor(s / 3600)}:${String(Math.floor(s % 3600 / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 };
-const ytAt = (sec) => `https://www.youtube.com/watch?v=${currentVid}&t=${Math.max(0, Math.floor(sec))}s`;
-const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const ytAt = (sec) => `https://www.youtube.com/watch?v=${vid}&t=${Math.max(0, Math.floor(sec))}s`;
 
 function videoId(url) {
   const m = url.match(/(?:v=|youtu\.be\/|\/live\/|\/shorts\/|\/embed\/)([\w-]{11})/);
@@ -20,158 +21,248 @@ function videoId(url) {
 }
 
 function setStatus(text, error = false) {
-  status.textContent = text;
-  status.classList.toggle("error", error);
+  $("status").textContent = text;
+  $("status").classList.toggle("error", error);
+}
+
+function setProgress(pct, text) {
+  $("progressWrap").hidden = pct === null;
+  if (pct !== null) {
+    $("progressFill").style.width = `${Math.min(100, Math.max(0, pct))}%`;
+    $("progressText").textContent = text;
+  }
 }
 
 function reset() {
-  windows = []; msgCount = 0;
-  $("chat").innerHTML = "";
-  $("moments").innerHTML = '<li class="muted">Nothing yet. Spikes appear here.</li>';
-  ["tNow", "tBase", "tViewers"].forEach((id) => ($(id).textContent = "–"));
-  $("tSpikes").textContent = "0";
-  $("msgCount").textContent = "0 messages";
+  windows = []; moments = []; selected = null; duration = 0;
+  ["tLen", "tMsgs", "tBase", "tTop"].forEach((id) => ($(id).textContent = "–"));
+  $("tChannel").innerHTML = $("tTopSub").innerHTML = "&nbsp;";
+  $("moments").innerHTML = '<li class="muted">Nothing yet.</li>';
+  $("momentCount").textContent = "";
+  $("chat").innerHTML = '<li class="muted">Pick a moment to read what chat said.</li>';
+  $("chatCount").textContent = "";
+  $("chatTitle").textContent = "Chat in the selected moment";
   $("chartEmpty").hidden = false;
+  setProgress(null);
   drawChart();
 }
 
+// ---- Player: YouTube embed, controlled with postMessage (enablejsapi=1) ----
 function showPlayer(id) {
-  const p = $("player");
-  p.innerHTML = id
-    ? `<iframe src="https://www.youtube-nocookie.com/embed/${id}?autoplay=1&mute=1" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen title="Stream"></iframe>`
-    : '<div class="placeholder">No video for demo mode. Add a YouTube link to watch one while the fake chat runs.</div>';
+  $("player").innerHTML = `<iframe id="yt" src="https://www.youtube-nocookie.com/embed/${id}?enablejsapi=1&rel=0"
+    allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen title="Stream recording"></iframe>`;
+}
+function seek(sec) {
+  const f = $("yt");
+  if (!f) return;
+  const send = (func, args = []) => f.contentWindow.postMessage(JSON.stringify({ event: "command", func, args }), "*");
+  send("seekTo", [Math.max(0, sec), true]);
+  send("playVideo");
 }
 
+// ---- Run ----
 function start() {
-  const url = $("url").value.trim();
-  const source = $("source").value;
-  if (source === "youtube" && !videoId(url)) {
-    setStatus("Paste a YouTube link first (or choose Demo).", true);
-    return;
-  }
+  const id = videoId($("url").value.trim());
+  if (!id) { setStatus("Paste a YouTube link first.", true); return; }
   reset();
-  currentVid = videoId(url);
-  showPlayer(currentVid);
-  es = new EventSource(`/api/run?source=${source}&url=${encodeURIComponent(url)}`);
+  vid = id;
+  showPlayer(id);
+  es = new EventSource(`/api/analyze?url=${encodeURIComponent(id)}`);
   es.onmessage = (e) => handle(JSON.parse(e.data));
-  es.onerror = () => { if (es) { setStatus("Lost connection to the app. Is it still running in the terminal?", true); stop(false); } };
-  btn.textContent = "Stop"; btn.classList.add("stop");
-  $("liveDot").classList.add("on");
-  setStatus("Connecting…");
+  es.onerror = () => { if (es) { setStatus("Lost connection to the app. Is it still running in the terminal?", true); finish(); } };
+  btn.textContent = "Cancel"; btn.classList.add("stop");
+  $("busyDot").classList.add("on");
 }
 
-function stop(clearStatus = true) {
+function finish() {
   if (es) { es.close(); es = null; }
-  btn.textContent = "Start"; btn.classList.remove("stop");
-  $("liveDot").classList.remove("on");
-  if (clearStatus) setStatus("Stopped. Results were saved in the project's output folder.");
+  btn.textContent = "Analyze"; btn.classList.remove("stop");
+  $("busyDot").classList.remove("on");
 }
 
-form.addEventListener("submit", (e) => { e.preventDefault(); es ? stop() : start(); });
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  if (es) { finish(); setStatus("Cancelled. Nothing was saved for this stream."); setProgress(null); }
+  else start();
+});
 
 function handle({ type, data }) {
   switch (type) {
     case "rules": rules = data; break;
+    case "status": setStatus(data); break;
     case "info":
-      setStatus(`Watching: ${data.title}${data.stream_time_now ? ` · stream is at ${clock(data.stream_time_now)}` : ""}`);
+      duration = data.duration;
+      $("tLen").textContent = clock(data.duration);
+      $("tChannel").textContent = data.channel || " ";
+      setStatus(data.cached ? `${data.title} (saved earlier, loading instantly)` : `${data.title}: downloading the chat replay…`);
+      setProgress(0, "starting…");
       break;
-    case "viewers": $("tViewers").textContent = Number(data).toLocaleString(); break;
-    case "message": addChat(data); break;
-    case "window": addWindow(data); break;
-    case "spikes": showMoments(data); break;
-    case "error": setStatus(data, true); stop(false); break;
-    case "end": setStatus("The stream or chat ended."); stop(false); break;
+    case "windows":
+      windows.push(...data);
+      $("chartEmpty").hidden = true;
+      drawChart();
+      break;
+    case "progress": {
+      const pct = data.duration ? (data.reached / data.duration) * 100 : 0;
+      $("tMsgs").textContent = data.messages.toLocaleString();
+      setProgress(pct, `${clock(data.reached)} of ${clock(data.duration)} · ${data.messages.toLocaleString()} messages`);
+      updateBaseline();
+      break;
+    }
+    case "moments": moments = data; renderMoments(); break;
+    case "done":
+      moments = data.moments;
+      $("tMsgs").textContent = data.messages.toLocaleString();
+      setStatus(`Done. ${data.all_moments} moments found. Click one to watch it.`);
+      setProgress(null);
+      finish();
+      updateBaseline();
+      renderMoments();
+      if (moments.length) selectMoment(0, false);
+      break;
+    case "error": setStatus(data, true); setProgress(null); finish(); break;
   }
 }
 
-function addChat(m) {
-  const ul = $("chat");
-  const atBottom = ul.scrollHeight - ul.scrollTop - ul.clientHeight < 40;
-  const li = document.createElement("li");
-  if (!m.counted) li.className = "skip";
-  li.innerHTML = `<span class="who">${esc(m.author)}</span>${esc(m.text)}`;
-  ul.appendChild(li);
-  while (ul.children.length > MAX_CHAT) ul.firstChild.remove();
-  if (atBottom) ul.scrollTop = ul.scrollHeight;
-  $("msgCount").textContent = `${(++msgCount).toLocaleString()} messages`;
+function updateBaseline() {
+  if (!windows.length) return;
+  const scores = windows.map((w) => w[1]).sort((a, b) => a - b);
+  $("tBase").textContent = Math.round(scores[Math.floor(scores.length / 2)]);
 }
 
-function addWindow(w) {
-  windows.push(w);
-  if (windows.length > MAX_BARS) windows.shift();
-  $("chartEmpty").hidden = true;
-  $("tNow").textContent = Math.round(w.score);
-  $("tBase").textContent = w.baseline ? Math.round(w.baseline) : "…";
-  $("tNow").parentElement.classList.toggle("hot", w.spike);
+// ---- Moments ----
+function sortedMoments() {
+  return moments.slice().sort((a, b) => (sortBy === "score" ? b.score - a.score : b.ratio - a.ratio));
+}
+
+function renderMoments() {
+  const list = sortedMoments();
+  $("momentCount").textContent = list.length ? `(${list.length})` : "";
+  const top = moments[0];
+  if (top) {
+    $("tTop").textContent = clock(top.peak);
+    $("tTopSub").textContent = `${Math.round(top.score)} per 10 s · ${top.ratio}× normal`;
+  }
+  if (!list.length) { $("moments").innerHTML = '<li class="muted">No spikes yet.</li>'; return; }
+  $("moments").innerHTML = list.map((s, i) => `
+    <li class="moment${selected === s.peak ? " sel" : ""}" data-i="${i}">
+      <div class="row"><span class="rank">#${i + 1}</span><span class="time">${clock(s.peak)}</span>
+        <span class="ratio">${Math.round(s.score)} msgs · ${s.ratio}× · ${s.people} people</span></div>
+      <div class="clip">Clip ${clock(s.clip_start)} → ${clock(s.clip_end)} (${Math.round(s.clip_end - s.clip_start)} s)
+        · <a href="${ytAt(s.clip_start)}" target="_blank" rel="noopener">YouTube ↗</a></div>
+      <div class="said">${esc(s.samples.slice(0, 3).join(" · "))}</div>
+    </li>`).join("");
   drawChart();
 }
 
-function showMoments(list) {
-  $("tSpikes").textContent = list.length;
-  const ol = $("moments");
-  if (!list.length) return;
-  const prev = ol.querySelectorAll(".moment").length;
-  ol.innerHTML = list.slice().reverse().map((s, i) => `
-    <li class="moment${i === 0 && list.length > prev ? " new" : ""}">
-      <div class="row"><span class="time">${clock(s.peak)}</span><span class="ratio">${s.ratio}× normal · ${s.people} people</span></div>
-      <div class="clip">Clip ${clock(s.clip_start)} → ${clock(s.clip_end)} (${Math.round(s.clip_end - s.clip_start)} s)
-        ${currentVid ? `· <a href="${ytAt(s.clip_start)}" target="_blank" rel="noopener">open on YouTube ↗</a>` : ""}</div>
-      <div class="said" title="${esc(s.samples.join(" | "))}">${esc(s.samples.slice(0, 3).join(" · "))}</div>
-    </li>`).join("");
+$("moments").addEventListener("click", (e) => {
+  if (e.target.closest("a")) return;
+  const li = e.target.closest(".moment");
+  if (li) selectMoment(+li.dataset.i, true);
+});
+
+document.querySelectorAll(".seg button").forEach((b) => b.addEventListener("click", () => {
+  sortBy = b.dataset.sort;
+  document.querySelectorAll(".seg button").forEach((x) => x.classList.toggle("on", x === b));
+  renderMoments();
+}));
+
+async function selectMoment(i, play) {
+  const s = sortedMoments()[i];
+  if (!s) return;
+  selected = s.peak;
+  renderMoments();
+  if (play) seek(s.clip_start);
+  $("chatTitle").textContent = `Chat at ${clock(s.clip_start)} → ${clock(s.clip_end)}`;
+  $("chat").innerHTML = '<li class="muted">Loading…</li>';
+  try {
+    const rows = await (await fetch(`/api/chat?v=${vid}&from=${s.clip_start}&to=${s.clip_end}`)).json();
+    $("chatCount").textContent = `${rows.length.toLocaleString()} messages`;
+    $("chat").innerHTML = rows.map((m) => `
+      <li class="${m.counted ? "" : "skip"}${m.t >= s.peak && m.t < s.peak + rules.window ? " peak" : ""}">
+        <button class="ts" data-t="${m.t}">${clock(m.t)}</button><span class="who">${esc(m.author)}</span>${esc(m.text)}</li>`).join("")
+      || '<li class="muted">No messages.</li>';
+  } catch {
+    $("chat").innerHTML = '<li class="muted">Couldn\'t load the chat.</li>';
+  }
 }
 
-// ---- Chart: one bar per 10-second window, dashed spike line, hover tooltip ----
+$("chat").addEventListener("click", (e) => {
+  const b = e.target.closest(".ts");
+  if (b) seek(+b.dataset.t - 3);
+});
+
+// ---- Chart: whole stream; bars grouped so it stays readable ----
+let buckets = [];
 function drawChart() {
   const svg = $("svg");
   const W = svg.clientWidth || 600, H = svg.clientHeight || 240;
-  const padL = 30, padB = 22, padT = 8;
+  const padL = 34, padB = 22, padT = 22;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
-  if (!windows.length) { svg.innerHTML = ""; return; }
+  if (!windows.length) { svg.innerHTML = ""; buckets = []; return; }
 
-  const top = Math.max(10, ...windows.map((w) => Math.max(w.score, w.limit))) * 1.1;
-  const slot = (W - padL) / MAX_BARS;
-  const bw = Math.max(2, slot - 2);                 // 2px gap between bars
-  const x = (i) => padL + (MAX_BARS - windows.length + i) * slot + 1;
+  const step = rules.window || 10;
+  const total = Math.max(duration, windows[windows.length - 1][0] + step);
+  const nBars = Math.min(MAX_BARS, Math.ceil(total / step));
+  const span = total / nBars;
+  buckets = Array.from({ length: nBars }, (_, i) => ({ t0: i * span, t1: (i + 1) * span, score: 0, msgs: 0, spike: false, has: false }));
+  for (const w of windows) {
+    const b = buckets[Math.min(nBars - 1, Math.floor(w[0] / span))];
+    b.score = Math.max(b.score, w[1]); b.msgs += w[2]; b.spike ||= !!w[5]; b.has = true;
+  }
+  const top = Math.max(10, ...buckets.map((b) => b.score)) * 1.08;
+  const slot = (W - padL) / nBars;
+  const gap = slot > 4 ? 1 : 0;
+  const bw = Math.max(1, slot - gap);
+  const x = (t) => padL + (t / total) * (W - padL);
   const y = (v) => padT + (1 - v / top) * (H - padT - padB);
 
   let out = "";
-  const step = top > 60 ? 20 : top > 30 ? 10 : 5;
-  for (let v = 0; v <= top; v += step) {
+  const tick = top > 300 ? 100 : top > 120 ? 50 : top > 60 ? 20 : 10;
+  for (let v = 0; v <= top; v += tick) {
     out += `<line class="grid-line" x1="${padL}" x2="${W}" y1="${y(v)}" y2="${y(v)}"/>`;
     out += `<text class="axis" x="${padL - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`;
   }
-  windows.forEach((w, i) => {
-    const h = Math.max(0, y(0) - y(w.score));
-    const r = Math.min(4, bw / 2, h);
-    // Bar rounded on top only, flat on the baseline.
-    const x0 = x(i), y0 = y(w.score), x1 = x0 + bw, yb = y(0);
-    const d = h <= 0 ? "" : `M${x0},${yb}V${y0 + r}Q${x0},${y0} ${x0 + r},${y0}H${x1 - r}Q${x1},${y0} ${x1},${y0 + r}V${yb}Z`;
-    out += `<rect class="hit" data-i="${i}" x="${x0 - 1}" y="${padT}" width="${slot}" height="${H - padT - padB}"/>`;
-    out += `<path class="bar${w.spike ? " spike" : ""}" d="${d}"/>`;
+  buckets.forEach((b, i) => {
+    if (!b.has || b.score <= 0) return;
+    const x0 = padL + i * slot, y0 = y(b.score), h = y(0) - y0, r = Math.min(3, bw / 2, h);
+    out += `<path class="bar${b.spike ? " spike" : ""}" d="M${x0},${y(0)}V${y0 + r}Q${x0},${y0} ${x0 + r},${y0}H${x0 + bw - r}Q${x0 + bw},${y0} ${x0 + bw},${y0 + r}V${y(0)}Z"/>`;
   });
-  const pts = windows.map((w, i) => `${x(i) + bw / 2},${y(w.limit)}`).join(" ");
-  out += `<polyline class="limit" points="${pts}"/>`;
-  // Time labels: first, middle, last bar.
-  [0, Math.floor(windows.length / 2), windows.length - 1].forEach((i) => {
-    if (i < 0 || (i > 0 && i === windows.length - 1 && windows.length < 3)) return;
-    out += `<text class="axis" x="${x(i) + bw / 2}" y="${H - 6}" text-anchor="middle">${clock(windows[i].start)}</text>`;
+  // Numbered markers for the 5 biggest moments
+  moments.slice(0, 5).forEach((s, i) => {
+    const cx = x(s.peak + step / 2);
+    out += `<g class="mark${selected === s.peak ? " sel" : ""}"><circle cx="${cx}" cy="${padT - 10}" r="8"/>
+      <text x="${cx}" y="${padT - 6}" text-anchor="middle">${i + 1}</text></g>`;
   });
+  if (selected !== null) {
+    out += `<line class="cursor" x1="${x(selected + step / 2)}" x2="${x(selected + step / 2)}" y1="${padT}" y2="${y(0)}"/>`;
+  }
+  for (let i = 0; i <= 6; i++) {
+    const t = (total * i) / 6;
+    out += `<text class="axis" x="${Math.min(Math.max(x(t), padL + 20), W - 24)}" y="${H - 5}" text-anchor="middle">${clock(t)}</text>`;
+  }
+  out += `<rect class="hit" x="${padL}" y="0" width="${W - padL}" height="${H - padB}"/>`;
   svg.innerHTML = out;
 }
 
+function bucketAt(e) {
+  const svg = $("svg"), r = svg.getBoundingClientRect();
+  const padL = 34, frac = (e.clientX - r.left - padL) / (r.width - padL);
+  if (frac < 0 || frac > 1 || !buckets.length) return null;
+  return buckets[Math.min(buckets.length - 1, Math.floor(frac * buckets.length))];
+}
+
 $("svg").addEventListener("mousemove", (e) => {
-  const t = e.target.closest(".hit");
-  const tip = $("tip");
-  if (!t) { tip.hidden = true; return; }
-  const w = windows[+t.dataset.i];
+  const b = bucketAt(e), tip = $("tip");
+  if (!b) { tip.hidden = true; return; }
   const box = $("chart").getBoundingClientRect();
-  tip.innerHTML = `<b>${clock(w.start)}</b> · score ${Math.round(w.score)}${w.spike ? " · SPIKE" : ""}<br>
-    ${w.raw} messages, ${w.counted} counted, ${w.people} people<br>
-    normal ${w.baseline || "…"} · spike line ${w.limit}`;
-  tip.style.left = `${Math.min(Math.max(e.clientX - box.left, 110), box.width - 110)}px`;
+  tip.innerHTML = `<b>${clock(b.t0)} – ${clock(b.t1)}</b>${b.spike ? " · SPIKE" : ""}<br>
+    ${b.has ? `peak ${Math.round(b.score)} per 10 s · ${b.msgs.toLocaleString()} messages` : "no chat yet"}<br>click to watch`;
+  tip.style.left = `${Math.min(Math.max(e.clientX - box.left, 120), box.width - 120)}px`;
   tip.style.top = `${e.clientY - box.top}px`;
   tip.hidden = false;
 });
 $("svg").addEventListener("mouseleave", () => ($("tip").hidden = true));
+$("svg").addEventListener("click", (e) => { const b = bucketAt(e); if (b) seek(b.t0); });
 window.addEventListener("resize", drawChart);
 reset();

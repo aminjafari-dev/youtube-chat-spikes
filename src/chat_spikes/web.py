@@ -1,4 +1,4 @@
-"""Local web page: paste a YouTube URL, press Start, watch the chat spikes live.
+"""Local web page: paste a finished YouTube stream, press Analyze, see its biggest chat spikes.
 
     uv run chat-spikes-web          # then open http://localhost:8765
 """
@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import json
-import queue
 import sys
 import threading
 import time
@@ -16,20 +15,28 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from .cli import load_ignore_users, video_id_from_or_none
-from .detector import Detector, Rules, Window, group_spikes, keep_message
+from .detector import Detector, Rules, Spike, Window, group_spikes, keep_message
+from .replay import RAW, ROOT, ReplayError, StreamInfo, load
 from .report import write_chart, write_spikes, write_windows
-from .sources import ROOT, SOURCES
 
 WEB = Path(__file__).parent / "webui"
 PORT = 8765
-GRACE = 4.0  # seconds to wait for late chat before closing a window
+TOP_MOMENTS = 200
 
 
-def window_json(w: Window, rules: Rules) -> dict:
-    return {"start": w.start, "score": round(w.score, 1), "raw": w.raw, "counted": w.counted,
-            "people": w.users, "baseline": round(w.baseline, 1),
-            "limit": round(max(rules.threshold * max(w.baseline, 1.0), rules.min_score), 1),
-            "ratio": round(w.ratio, 2), "spike": w.is_spike, "samples": w.samples}
+def window_row(w: Window) -> list:
+    # Compact: [start, score, messages, people, normal_level, spike]
+    return [int(w.start), round(w.score, 1), w.raw, w.users, round(w.baseline, 1), int(w.is_spike)]
+
+
+def spike_json(s: Spike) -> dict:
+    return {"peak": s.peak.start, "clip_start": s.clip_start, "clip_end": s.clip_end,
+            "score": round(s.peak.score, 1), "ratio": round(s.peak.ratio, 1),
+            "people": s.peak.users, "samples": s.peak.samples}
+
+
+def ranked(spikes: list[Spike]) -> list[dict]:
+    return [spike_json(s) for s in sorted(spikes, key=lambda s: -s.peak.score)[:TOP_MOMENTS]]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -38,15 +45,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urlparse(self.path)
-        if u.path == "/api/run":
-            return self.run_stream(parse_qs(u.query))
+        qs = parse_qs(u.query)
+        if u.path == "/api/analyze":
+            return self.analyze(qs)
+        if u.path == "/api/chat":
+            return self.chat_between(qs)
         name = "index.html" if u.path in ("/", "") else u.path.lstrip("/")
         f = (WEB / name).resolve()
         if WEB.resolve() not in f.parents or not f.is_file():
             self.send_error(404)
             return
         ctype = {"html": "text/html", "css": "text/css", "js": "application/javascript"}.get(f.suffix[1:], "text/plain")
-        body = f.read_bytes()
+        self.send_bytes(f.read_bytes(), ctype)
+
+    def send_bytes(self, body: bytes, ctype: str) -> None:
         self.send_response(200)
         self.send_header("Content-Type", f"{ctype}; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -57,83 +69,89 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(f"data: {json.dumps({'type': kind, 'data': data}, ensure_ascii=False)}\n\n".encode())
         self.wfile.flush()
 
-    def run_stream(self, qs: dict) -> None:
-        url = (qs.get("url") or [""])[0].strip()
-        mode = (qs.get("source") or ["youtube"])[0]
-        vid = video_id_from_or_none(url) if url else None
+    def chat_between(self, qs: dict) -> None:
+        """Chat messages of a saved stream between two times (for the selected moment)."""
+        vid = (qs.get("v") or [""])[0]
+        t0, t1 = float((qs.get("from") or [0])[0]), float((qs.get("to") or [0])[0])
+        rows = []
+        for path in (RAW / f"{vid}.jsonl", RAW / f"{vid}.jsonl.part"):
+            if video_id_from_or_none(vid) == vid and path.exists():
+                ignore = load_ignore_users()
+                rules = Rules(ignore_users=ignore)
+                with path.open() as f:
+                    for line in f:
+                        t, a, x = json.loads(line)
+                        if t > t1:
+                            break
+                        if t >= t0:
+                            rows.append({"t": t, "author": a, "text": x, "counted": keep_message(a, x, rules)})
+                break
+        self.send_bytes(json.dumps(rows[:2000], ensure_ascii=False).encode(), "application/json")
 
+    def analyze(self, qs: dict) -> None:
+        url = (qs.get("url") or [""])[0].strip()
+        vid = video_id_from_or_none(url)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
-
-        if mode not in SOURCES:
-            self.send_event("error", "Unknown source.")
-            return
-        if mode == "youtube" and not vid:
+        if not vid:
             self.send_event("error", "That doesn't look like a YouTube link.")
             return
 
         rules = Rules(ignore_users=load_ignore_users())
         det = Detector(rules)
-        q: queue.Queue = queue.Queue()
         stop = threading.Event()
-        start = time.time()
-        threading.Thread(target=SOURCES[mode], args=(vid or "", q, stop, start), daemon=True).start()
+        state: dict = {"info": None, "reached": 0.0, "count": 0}
         self.send_event("rules", {"window": rules.window, "threshold": rules.threshold,
                                   "min_score": rules.min_score, "lead": rules.lead, "tail": rules.tail})
-        title = "demo"
-        spikes_sent = 0
-        base: float | None = None  # when the stream started (epoch seconds); all times are stream time
+
+        def on_info(info: StreamInfo, from_cache: bool) -> None:
+            state["info"] = info
+            self.send_event("info", {"video_id": info.video_id, "title": info.title, "channel": info.channel,
+                                     "duration": info.duration, "cached": from_cache})
+
+        def on_progress(reached: float, count: int) -> None:
+            state["reached"], state["count"] = reached, count
+
+        self.send_event("status", "Checking the video…")
+        pending: list[Window] = []
+        last_sent = time.time()
+        total = 0
         try:
-            last_ping = time.time()
-            while True:
-                try:
-                    kind, data = q.get(timeout=0.5)
-                except queue.Empty:
-                    kind, data = None, None
-                closed: list[Window] = []
-                if kind == "message":
-                    t, author, text = data
-                    closed += det.add(t, author, text)
-                    self.send_event("message", {"t": t, "author": author, "text": text,
-                                                "counted": keep_message(author, text, rules)})
-                elif kind == "info":
-                    title = data["title"]
-                    base = data.get("stream_start") or start
-                    data["stream_time_now"] = time.time() - base
-                    self.send_event("info", data)
-                elif kind in ("viewers", "error"):
-                    self.send_event(kind, data)
-                elif kind == "end":
-                    self.send_event("end", None)
-                    break
-                if base is not None:
-                    closed += det.advance(time.time() - base - GRACE)
-                for w in closed:
-                    self.send_event("window", window_json(w, rules))
-                spikes = group_spikes(det.windows, rules)
-                if len(spikes) != spikes_sent or (closed and spikes and closed[-1].is_spike):
-                    spikes_sent = len(spikes)
-                    self.send_event("spikes", [{
-                        "peak": s.peak.start, "clip_start": s.clip_start, "clip_end": s.clip_end,
-                        "ratio": round(s.peak.ratio, 1), "people": s.peak.users,
-                        "samples": s.peak.samples} for s in spikes])
-                if time.time() - last_ping > 15:  # keep the connection open
-                    self.wfile.write(b": ping\n\n")
-                    self.wfile.flush()
-                    last_ping = time.time()
+            for t, author, text in load(vid, stop, on_info, on_progress):
+                total += 1
+                pending += det.add(t, author, text)
+                if time.time() - last_sent > 0.7:  # send results in batches while downloading
+                    self.flush_progress(det, pending, state, total, rules)
+                    pending, last_sent = [], time.time()
+            pending += det.flush()
+            self.flush_progress(det, pending, state, total, rules)
+            spikes = group_spikes(det.windows, rules)
+            self.send_event("done", {"messages": total, "moments": ranked(spikes), "all_moments": len(spikes)})
+            self.save(vid, state["info"], det.windows, spikes, rules)
+        except ReplayError as e:
+            self.send_event("error", str(e))
         except (BrokenPipeError, ConnectionResetError):
-            pass  # the page pressed Stop or was closed
+            pass  # the page was closed or Cancel was pressed
         finally:
             stop.set()
-            if det.windows:
-                out = ROOT / "output" / (f"{vid}-live" if mode == "youtube" else "demo")
-                out.mkdir(parents=True, exist_ok=True)
-                spikes = group_spikes(det.windows, rules)
-                write_windows(out / "windows.csv", det.windows)
-                write_spikes(out / "spikes.csv", spikes, vid or "")
-                write_chart(out / "chart.html", det.windows, spikes, rules, title, vid or "")
+
+    def flush_progress(self, det: Detector, pending: list[Window], state: dict, total: int, rules: Rules) -> None:
+        if pending:
+            self.send_event("windows", [window_row(w) for w in pending])
+        info = state["info"]
+        reached = max(state["reached"], det.windows[-1].start if det.windows else 0)
+        self.send_event("progress", {"reached": reached, "duration": info.duration if info else 0,
+                                     "messages": total})
+        self.send_event("moments", ranked(group_spikes(det.windows, rules)))
+
+    def save(self, vid: str, info: StreamInfo | None, windows, spikes, rules) -> None:
+        out = ROOT / "output" / vid
+        out.mkdir(parents=True, exist_ok=True)
+        write_windows(out / "windows.csv", windows)
+        write_spikes(out / "spikes.csv", spikes, vid)
+        write_chart(out / "chart.html", windows, spikes, rules, info.title if info else vid, vid)
 
 
 def main() -> None:

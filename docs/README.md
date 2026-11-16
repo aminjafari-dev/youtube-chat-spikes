@@ -1,85 +1,104 @@
-# YouTube Chat Spikes
+# YouTube Chat Spikes (finished streams)
 
 - **Started:** 2026-11-17
-- **Status:** Web page working in demo mode. YouTube live mode built on the official API, needs your API key to test.
+- **Branch:** `finished-streams`. The live-stream version (official API) stays on `main`.
+- **Status:** Working. Paste a finished stream, get its biggest chat spikes as moments to clip.
 - **Part of:** [twitch-chat-clipper](../../twitch-chat-clipper/docs/README.md) (Option A: rules only, no AI, $0)
 
 ## What it does
 
-Give it a YouTube stream (live or finished). It counts chat messages every 10 seconds, compares each window with the stream's normal level, and lists the moments where chat exploded, with clip start/end times (20 s before the spike, 15 s after).
+1. You paste the link of a YouTube stream that has **ended**.
+2. **yt-dlp** downloads the stream's chat replay: every message with its exact position in the recording.
+3. The chat is cut into 10-second windows and compared with the stream's normal level.
+4. You get the moments where chat exploded, ranked biggest first, with clip times
+   (20 s before the spike to 15 s after), a link to that point on YouTube, and what chat said.
 
-## Rules (Option A, no AI)
+No API key, no daily limit.
 
-- Ignore bots (`config/ignore_users.txt`) and `!commands` (giveaways, bot commands).
-- One person counts at most 2 messages per window, so spam can't fake a spike.
-- Reaction messages (LOL, no way, 😂, 💀, W, clip it ...) add a small bonus.
-- Normal level = median of the last 5 minutes. Spike = at least 2.5x normal and a score of at least 8.
-- Spikes within 30 s of each other become one moment.
-
-## The web page (easiest)
+## Run it
 
 ```bash
 cd /Volumes/Development/claude/projects/youtube-chat-spikes
 uv run chat-spikes-web
 ```
 
-It opens http://localhost:8765. Paste a YouTube live link, press **Start**:
-- the stream plays on the page (muted at first)
-- tiles: chat per 10 s, normal level, viewers, moments found
-- live bar chart of the last 10 minutes (orange = spike, dashed line = spike level, hover for details)
-- live chat feed (bot and `!command` messages are crossed out: not counted)
-- "Moments to clip" list with clip start/end times and what chat said
+Opens http://localhost:8765. Paste a link, press **Analyze**.
 
-**Demo (fake chat)** mode works without any key, so you can try it right away. Add a YouTube link in demo mode to watch a real stream next to the fake chat.
+- **Progress bar** while the chat downloads. The chart and moments fill in as it goes.
+- **Chart of the whole stream**: orange = spike, numbered dots = top 5. Click anywhere to jump the video there.
+- **Moments to clip**: sort by *Most messages* (biggest) or *Most × normal* (most surprising).
+  Click a moment: the video jumps there and the chat of that clip is shown (peak window highlighted).
+  Click a time in the chat to jump to that message.
+- **Cancel** stops the download; nothing half-done is kept.
 
-**YouTube live** mode uses the official YouTube Data API. It needs a free key:
-copy `.env.example` to `.env` and paste the key. Limits: live streams only, and the free daily quota is about 10,000 units
-(each chat check costs a few units), roughly a few hours of watching per day.
-
-When you press Stop, results are saved to `output/demo/` or `output/<video-id>-live/`.
-
-## Command line (finished streams)
+Command line (same results, no page):
 
 ```bash
-cd /Volumes/Development/claude/projects/youtube-chat-spikes
-uv run chat-spikes "https://www.youtube.com/watch?v=VIDEO_ID"
+uv run chat-spikes "https://www.youtube.com/watch?v=VIDEO_ID" --top 10
 ```
 
 Options: `--window 10 --threshold 2.5 --min-score 8 --lead 20 --tail 15 --refresh`
 
-Results go to `output/<video-id>/`:
-- `chart.html`: chat activity chart; spikes in orange; table with links that open YouTube at the clip start
-- `spikes.csv`: moments, best first, with clip times and sample messages
-- `windows.csv`: every 10-second window
+Results are saved in `output/<video-id>/` (`chart.html`, `spikes.csv`, `windows.csv`).
+The chat is saved in `data/raw/<video-id>.jsonl`, so opening the same stream again is instant.
 
-Downloaded chat is saved in `data/raw/` so re-running with different settings is instant.
+## How long the download takes
+
+YouTube hands out chat replay a few seconds at a time, so yt-dlp reads it piece by piece.
+Measured on 2026-11-17:
+
+| Stream | Chat | Time |
+|--------|------|------|
+| Linus Tech Tips, 2.5 h (quiet chat) | 597 messages | 22 s |
+| IShowSpeed, 2 h (one of YouTube's busiest chats) | 105,000 messages | ~11 min |
+| Typical Gamer, 12 h | ~1,300 messages per 2.5 min of stream | roughly 1–2 h (estimate) |
+
+The busier the chat, the longer it takes; stream length matters less.
+Very quiet chats (a few messages a minute) may show no moments: nothing ever reaches the minimum of 8 per 10 s.
+
+Second time: instant (saved copy).
+
+## Rules (Option A, no AI)
+
+- Ignore bots (`config/ignore_users.txt`) and `!commands` (giveaways, bot commands).
+- One person counts at most 2 messages per window, so spam can't fake a spike.
+- Reaction messages (LOL, no way, 😂, 💀, W, clip it …) add a small bonus.
+- Normal level = median of the previous 5 minutes.
+- A window is a spike when it has a score of at least 8 **and** either:
+  - it's **2.5× the normal level** (works for small and medium streams), or
+  - it's **far above the normal ups and downs** (normal + 4 × typical swing).
+    Needed for huge streams: YouTube caps chat replay at roughly 15 messages per second,
+    so on a mega-stream chat can never double. Found on IShowSpeed: always 120–175 per 10 s.
+- Spikes within 30 s of each other become one moment.
+
+## When it can't work
+
+- The stream is still live → wait until it ends (or use the `main` branch).
+- Chat replay turned off by the streamer, private or members-only stream → no chat to read.
+- A normal video (not a past live stream) has no chat.
+
+The page shows a clear message for each case.
 
 ## Code
 
 | File | Job |
 |------|-----|
-| `src/chat_spikes/detector.py` | Windows, rules, spike detection (works the same live or after) |
-| `src/chat_spikes/report.py` | CSV files and chart |
-| `src/chat_spikes/youtube.py` | Reads YouTube chat (**unfinished, see below**) |
-| `src/chat_spikes/cli.py` | The `chat-spikes` command |
+| `src/chat_spikes/replay.py` | Downloads chat replay with yt-dlp, reads it while it downloads, saves a compact copy |
+| `src/chat_spikes/detector.py` | Windows, rules, spike detection |
+| `src/chat_spikes/report.py` | CSV files and the standalone chart |
 | `src/chat_spikes/web.py` | Local web server for the page (`chat-spikes-web`) |
-| `src/chat_spikes/sources.py` | Live chat sources: official YouTube API, demo |
 | `src/chat_spikes/webui/` | The page: `index.html`, `style.css`, `app.js` |
+| `src/chat_spikes/cli.py` | Command line (`chat-spikes`) |
 
-## Open issue: where the YouTube chat comes from
+## Maintenance
 
-1. `chat-downloader` (the library most GitHub tools use) is broken: unmaintained since 2023, fails on today's YouTube.
-2. `youtube.py` reads YouTube's internal chat endpoint (what the youtube.com chat box uses). It got data back in testing, but it is unofficial and could break at any time.
-3. Choices:
-   - **Official YouTube Data API**: free API key, live streams only, daily quota.
-   - **yt-dlp**: well maintained; downloads chat of finished streams.
-   - **Keep the internal endpoint**: works for both, may break.
+If YouTube changes something and downloads start failing, update yt-dlp:
+
+```bash
+uv lock --upgrade-package yt-dlp && uv sync
+```
 
 ## Existing tools on GitHub (checked 2026-11-17)
 
-- CHAD (david-ca6/chad): chat activity dashboard for YouTube/Twitch replays (uses chat-downloader)
-- chat-analyzer (PyPI): YouTube/Twitch highlight analysis (uses chat-downloader)
-- stream-analyser (emso-c): highlight detection from chat, inactive since 2022
-- YBIGTA/24th-de-highlighter: real-time YouTube highlight detection, student project
-
-None was a clean fit: they depend on the broken library or are inactive, so this project has its own small detector.
+CHAD, chat-analyzer, stream-analyser, YBIGTA/24th-de-highlighter. All depend on the broken
+`chat-downloader` library or are inactive, so this project has its own small detector.

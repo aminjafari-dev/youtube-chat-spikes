@@ -1,10 +1,10 @@
 [project]
 name = "youtube-chat-spikes"
 version = "0.1.0"
-description = "Find the moments when a YouTube stream's chat explodes (live or after the stream)."
+description = "Find the biggest chat spikes in finished YouTube streams."
 requires-python = ">=3.11"
 dependencies = [
-    "requests>=2.34.2",
+    "yt-dlp>=2026.10.26",
 ]
 
 [project.scripts]

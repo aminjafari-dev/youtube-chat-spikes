@@ -24,6 +24,10 @@ REACTION_RE = re.compile(
 class Rules:
     window: int = 10            # seconds per window
     threshold: float = 2.5      # spike = score >= threshold x normal level
+    # Huge streams: YouTube caps how much chat it keeps (~15 msgs/s), so chat can't double.
+    # There, a spike is a window far above the normal ups and downs:
+    # score >= normal + spread_k x typical swing (robust: median absolute deviation).
+    spread_k: float = 4.0
     min_score: float = 8.0      # ignore tiny streams where 3 messages look like a spike
     history: int = 30           # windows used to measure the normal level (30 x 10 s = 5 min)
     per_user_cap: int = 2       # one person spamming counts at most this many times per window
@@ -96,7 +100,13 @@ class Detector:
         # Normal level = median of recent windows (median ignores earlier spikes).
         w.baseline = statistics.median(self._recent) if len(self._recent) >= 3 else 0.0
         floor = max(w.baseline, 1.0)
-        w.is_spike = len(self._recent) >= 3 and w.score >= r.min_score and w.score >= r.threshold * floor
+        enough = len(self._recent) >= 3 and w.score >= r.min_score
+        doubled = w.score >= r.threshold * floor
+        stands_out = False
+        if len(self._recent) >= 10:
+            swing = 1.4826 * statistics.median(abs(x - w.baseline) for x in self._recent)
+            stands_out = swing > 0 and w.score >= w.baseline + r.spread_k * max(swing, 0.1 * floor)
+        w.is_spike = enough and (doubled or stands_out)
         self._recent.append(w.score)
         self.windows.append(w)
         self._per_user = Counter()

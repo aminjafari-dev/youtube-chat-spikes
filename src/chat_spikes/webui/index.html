@@ -9,62 +9,71 @@
 <body>
   <header class="top">
     <div class="brand">
-      <span class="dot" id="liveDot"></span>
+      <span class="dot" id="busyDot"></span>
       <h1>Chat Spikes</h1>
     </div>
     <form id="form" class="controls">
-      <input id="url" type="url" placeholder="Paste a YouTube live link…" autocomplete="off">
-      <select id="source" aria-label="Chat source">
-        <option value="youtube">YouTube live</option>
-        <option value="demo">Demo (fake chat)</option>
-      </select>
-      <button id="btn" type="submit">Start</button>
+      <input id="url" type="url" placeholder="Paste a finished YouTube stream link…" autocomplete="off">
+      <button id="btn" type="submit">Analyze</button>
     </form>
   </header>
 
-  <p id="status" class="status">Paste a link and press Start. No link? Pick “Demo” to see how it works.</p>
+  <div class="statusbar">
+    <p id="status" class="status">Paste the link of a stream that has ended, then press Analyze.</p>
+    <div class="progress" id="progressWrap" hidden>
+      <div class="track"><div class="fill" id="progressFill"></div></div>
+      <span class="small muted" id="progressText"></span>
+    </div>
+  </div>
 
   <main class="grid">
     <section class="left">
       <div class="player" id="player">
-        <div class="placeholder">The stream will show here</div>
+        <div class="placeholder">The stream recording will show here</div>
       </div>
 
       <div class="tiles">
-        <div class="tile"><span class="label">Chat now</span><span class="value" id="tNow">–</span><span class="sub">per 10 s</span></div>
-        <div class="tile"><span class="label">Normal level</span><span class="value" id="tBase">–</span><span class="sub">last 5 min</span></div>
-        <div class="tile"><span class="label">Viewers</span><span class="value" id="tViewers">–</span><span class="sub">watching</span></div>
-        <div class="tile"><span class="label">Moments</span><span class="value" id="tSpikes">0</span><span class="sub">spikes found</span></div>
+        <div class="tile"><span class="label">Stream length</span><span class="value" id="tLen">–</span><span class="sub" id="tChannel">&nbsp;</span></div>
+        <div class="tile"><span class="label">Chat messages</span><span class="value" id="tMsgs">–</span><span class="sub">in the replay</span></div>
+        <div class="tile"><span class="label">Normal level</span><span class="value" id="tBase">–</span><span class="sub">per 10 s (typical)</span></div>
+        <div class="tile hot-tile"><span class="label">Biggest spike</span><span class="value" id="tTop">–</span><span class="sub" id="tTopSub">&nbsp;</span></div>
       </div>
 
       <div class="card">
         <div class="card-head">
-          <h2>Chat activity</h2>
+          <h2>Chat activity across the whole stream</h2>
           <div class="key">
             <span><i class="sw normal"></i>normal</span>
             <span><i class="sw spike"></i>spike</span>
-            <span><i class="sw line"></i>spike line</span>
+            <span><i class="sw mark">1</i>top moments</span>
           </div>
         </div>
         <div class="chart" id="chart">
-          <svg id="svg" preserveAspectRatio="none"></svg>
+          <svg id="svg"></svg>
           <div class="tip" id="tip" hidden></div>
-          <div class="empty" id="chartEmpty">Waiting for the first 10 seconds of chat…</div>
+          <div class="empty" id="chartEmpty">The chart fills in as the chat replay is read.</div>
         </div>
+        <p class="hint small muted">Click anywhere on the chart to jump the video to that time.</p>
       </div>
     </section>
 
     <aside class="right">
       <div class="card moments">
-        <h2>Moments to clip <span class="muted small">(stream time)</span></h2>
-        <ol id="moments" class="moment-list"><li class="muted">Nothing yet. Spikes appear here.</li></ol>
+        <div class="card-head">
+          <h2>Moments to clip <span class="muted small" id="momentCount"></span></h2>
+          <div class="seg" role="group" aria-label="Sort moments">
+            <button type="button" data-sort="score" class="on">Most messages</button>
+            <button type="button" data-sort="ratio">Most × normal</button>
+          </div>
+        </div>
+        <ol id="moments" class="moment-list"><li class="muted">Nothing yet.</li></ol>
       </div>
       <div class="card chatcard">
         <div class="card-head">
-          <h2>Live chat</h2>
-          <span class="muted small" id="msgCount">0 messages</span>
+          <h2 id="chatTitle">Chat in the selected moment</h2>
+          <span class="muted small" id="chatCount"></span>
         </div>
-        <ul id="chat" class="chat"></ul>
+        <ul id="chat" class="chat"><li class="muted">Pick a moment to read what chat said.</li></ul>
       </div>
     </aside>
   </main>
