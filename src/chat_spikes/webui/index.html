@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chat Spikes</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="dot" id="liveDot"></span>
+      <h1>Chat Spikes</h1>
+    </div>
+    <form id="form" class="controls">
+      <input id="url" type="url" placeholder="Paste a YouTube live link…" autocomplete="off">
+      <select id="source" aria-label="Chat source">
+        <option value="youtube">YouTube live</option>
+        <option value="demo">Demo (fake chat)</option>
+      </select>
+      <button id="btn" type="submit">Start</button>
+    </form>
+  </header>
+
+  <p id="status" class="status">Paste a link and press Start. No link? Pick “Demo” to see how it works.</p>
+
+  <main class="grid">
+    <section class="left">
+      <div class="player" id="player">
+        <div class="placeholder">The stream will show here</div>
+      </div>
+
+      <div class="tiles">
+        <div class="tile"><span class="label">Chat now</span><span class="value" id="tNow">–</span><span class="sub">per 10 s</span></div>
+        <div class="tile"><span class="label">Normal level</span><span class="value" id="tBase">–</span><span class="sub">last 5 min</span></div>
+        <div class="tile"><span class="label">Viewers</span><span class="value" id="tViewers">–</span><span class="sub">watching</span></div>
+        <div class="tile"><span class="label">Moments</span><span class="value" id="tSpikes">0</span><span class="sub">spikes found</span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Chat activity</h2>
+          <div class="key">
+            <span><i class="sw normal"></i>normal</span>
+            <span><i class="sw spike"></i>spike</span>
+            <span><i class="sw line"></i>spike line</span>
+          </div>
+        </div>
+        <div class="chart" id="chart">
+          <svg id="svg" preserveAspectRatio="none"></svg>
+          <div class="tip" id="tip" hidden></div>
+          <div class="empty" id="chartEmpty">Waiting for the first 10 seconds of chat…</div>
+        </div>
+      </div>
+    </section>
+
+    <aside class="right">
+      <div class="card moments">
+        <h2>Moments to clip <span class="muted small">(stream time)</span></h2>
+        <ol id="moments" class="moment-list"><li class="muted">Nothing yet. Spikes appear here.</li></ol>
+      </div>
+      <div class="card chatcard">
+        <div class="card-head">
+          <h2>Live chat</h2>
+          <span class="muted small" id="msgCount">0 messages</span>
+        </div>
+        <ul id="chat" class="chat"></ul>
+      </div>
+    </aside>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

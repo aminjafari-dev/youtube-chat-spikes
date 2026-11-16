@@ -9,6 +9,7 @@ dependencies = [
 
 [project.scripts]
 chat-spikes = "chat_spikes.cli:main"
+chat-spikes-web = "chat_spikes.web:main"
 
 [build-system]
 requires = ["hatchling"]

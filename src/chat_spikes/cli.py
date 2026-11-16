@@ -23,13 +23,17 @@ from .youtube import ChatError, open_chat
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def video_id_from(url: str) -> str:
+def video_id_from_or_none(url: str) -> str | None:
     m = re.search(r"(?:v=|youtu\.be/|/live/|/shorts/|/embed/)([\w-]{11})", url)
     if m:
         return m.group(1)
     if re.fullmatch(r"[\w-]{11}", url):
         return url
-    sys.exit(f"Couldn't find a YouTube video ID in: {url}")
+    return None
+
+
+def video_id_from(url: str) -> str:
+    return video_id_from_or_none(url) or sys.exit(f"Couldn't find a YouTube video ID in: {url}")
 
 
 def load_ignore_users() -> set[str]:

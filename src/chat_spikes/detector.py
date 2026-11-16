@@ -45,6 +45,8 @@ class Window:
     baseline: float = 0.0
     is_spike: bool = False
     samples: list[str] = field(default_factory=list)
+    _react_samples: list[str] = field(default_factory=list, repr=False)
+    _other_samples: list[str] = field(default_factory=list, repr=False)
 
     @property
     def ratio(self) -> float:
@@ -117,10 +119,30 @@ class Detector:
         w.raw += 1
         if keep_message(author, text, r):
             self._per_user[author] += 1
-            if self._per_user[author] <= r.per_user_cap and REACTION_RE.search(text):
+            is_reaction = bool(REACTION_RE.search(text))
+            if self._per_user[author] <= r.per_user_cap and is_reaction:
                 w.reactions += 1
-            if len(w.samples) < 5 and self._per_user[author] == 1:
-                w.samples.append(f"{author}: {text.strip()[:80]}")
+            if self._per_user[author] == 1:
+                line = f"{author}: {text.strip()[:80]}"
+                # Show what people reacted with: reactions go first, ordinary chat fills the rest.
+                if is_reaction:
+                    w._react_samples.append(line)
+                else:
+                    w._other_samples.append(line)
+                w.samples = (w._react_samples + w._other_samples)[:5]
+        return done
+
+    def advance(self, now: float) -> list[Window]:
+        """Live mode: close windows whose time has passed, even if chat is silent."""
+        r = self.rules
+        done: list[Window] = []
+        if self.current is None:
+            self.current = Window(start=(now // r.window) * r.window)
+            return done
+        while now >= self.current.start + r.window:
+            nxt = self.current.start + r.window
+            done.append(self._close())
+            self.current = Window(start=nxt)
         return done
 
     def flush(self) -> list[Window]:
