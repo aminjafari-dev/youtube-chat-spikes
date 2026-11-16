@@ -1,0 +1,8 @@
+# Chat bots and accounts whose messages are never counted.
+# One name per line, not case-sensitive. Lines starting with # are ignored.
+Nightbot
+Streamlabs
+StreamElements
+Moobot
+Fossabot
+Wizebot

@@ -1,0 +1,18 @@
+[project]
+name = "youtube-chat-spikes"
+version = "0.1.0"
+description = "Find the moments when a YouTube stream's chat explodes (live or after the stream)."
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.34.2",
+]
+
+[project.scripts]
+chat-spikes = "chat_spikes.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/chat_spikes"]
