@@ -8,14 +8,13 @@ let windows = [];   // [start, score, messages, people, normal, spike]
 let moments = [];   // from the server, biggest first
 let sortBy = "score", selected = null;
 let why = {};            // peak -> {evidence, ai, ai_error, has_key, loading}
-let autoQueue = [];      // moments Gemini explains automatically after the analysis
-const AUTO_TOP = 3;      // free tier: keep it small
 
 const clock = (sec) => {
   const s = Math.max(0, Math.floor(sec));
   return `${Math.floor(s / 3600)}:${String(Math.floor(s % 3600 / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
 };
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const clockMs = (sec) => `${clock(sec)}.${Math.floor((Math.max(0, sec) % 1) * 10)}`;
 const ytAt = (sec) => `https://www.youtube.com/watch?v=${vid}&t=${Math.max(0, Math.floor(sec))}s`;
 
 function videoId(url) {
@@ -37,7 +36,7 @@ function setProgress(pct, text) {
 }
 
 function reset() {
-  windows = []; moments = []; selected = null; duration = 0; why = {}; autoQueue = [];
+  windows = []; moments = []; selected = null; duration = 0; why = {};
   $("whyCard").hidden = true;
   ["tLen", "tMsgs", "tBase", "tTop"].forEach((id) => ($(id).textContent = "–"));
   $("tChannel").innerHTML = $("tTopSub").innerHTML = "&nbsp;";
@@ -123,8 +122,6 @@ function handle({ type, data }) {
       updateBaseline();
       renderMoments();
       if (moments.length) selectMoment(0, false);
-      autoQueue = moments.slice(0, AUTO_TOP);
-      runAutoQueue();
       break;
     case "error": setStatus(data, true); setProgress(null); finish(); break;
   }
@@ -176,7 +173,7 @@ document.querySelectorAll(".seg button").forEach((b) => b.addEventListener("clic
 // ---- Why? Free chat evidence + Gemini ----
 function badge(s) {
   const w = why[s.peak];
-  if (w && w.loading) return '<span class="vbadge wait" title="Gemini is watching this clip">…</span>';
+  if (w && w.loading) return '<span class="vbadge wait" title="Gemini is checking this moment">…</span>';
   if (w && w.ai) return `<span class="vbadge s${Math.min(3, Math.floor(w.ai.viral_score / 4))}" title="Viral score from Gemini">${w.ai.viral_score}/10</span>`;
   return "";
 }
@@ -194,17 +191,6 @@ async function loadWhy(s, ai) {
     why[s.peak] = { ...cur, loading: false, ai_error: "Couldn't reach the app." };
   }
   renderMoments(); if (selected === s.peak) renderWhy(s);
-}
-
-async function runAutoQueue() {
-  while (autoQueue.length) {
-    const s = autoQueue.shift();
-    if (!why[s.peak] || !why[s.peak].evidence) await loadWhy(s, false);
-    const w = why[s.peak];
-    if (!w.has_key) { autoQueue = []; break; }      // no Gemini key: evidence only
-    if (!w.ai) await loadWhy(s, true);
-    if (why[s.peak].ai_error) { autoQueue = []; break; } // e.g. free limit reached: stop asking
-  }
 }
 
 const TYPE_ICON = { funny: "😂", shock: "😱", skill_win: "🔥", fail: "💔", rage: "😡", payoff: "🎉",
@@ -231,21 +217,33 @@ function renderWhy(s) {
       <div class="ai-head"><span class="vscore s${Math.min(3, Math.floor(a.viral_score / 4))}">${a.viral_score}<small>/10</small></span>
         <div><div class="ai-title">${esc(a.title)}</div>
         <div class="muted small">${TYPE_ICON[a.moment_type] || ""} ${esc(a.moment_type.replace("_", " "))} · confidence ${esc(a.confidence)} · hook: “${esc(a.hook)}”</div></div></div>
+      <div class="cut">
+        <div class="cut-head"><span class="cut-label">Clip it here</span>
+          <button class="playcut" id="playBest">▶ ${clockMs(a.best_start)} → ${clockMs(a.best_end)}</button>
+          <span class="muted small">${(a.best_end - a.best_start).toFixed(1)} s · <a href="${ytAt(a.best_start)}" target="_blank" rel="noopener">YouTube ↗</a></span></div>
+        <div class="cut-row"><span class="ev-label">Start when they say</span><span class="quote">“${esc(a.start_words)}” <span class="muted small">(line ${a.start_line})</span></span></div>
+        <div class="cut-row"><span class="ev-label">End after</span><span class="quote">“${esc(a.end_words)}” <span class="muted small">(line ${a.end_line})</span></span></div>
+        <p class="small muted cut-why">${esc(a.cut_reason)}${a.words_found ? "" : " · exact words not found in the captions, times are from the whole line"}</p>
+      </div>
       <dl class="ai-body">
         <dt>What happened</dt><dd>${esc(a.what_happened)}</dd>
         <dt>Why chat reacted</dt><dd>${esc(a.why_chat_reacted)}</dd>
         <dt>Why it could go viral</dt><dd>${esc(a.why_viral)}</dd>
-        <dt>Best clip</dt><dd><button class="linkbtn" id="playBest">▶ ${clock(a.best_start)} → ${clock(a.best_end)}</button>
-          (${Math.round(a.best_end - a.best_start)} s) · <a href="${ytAt(a.best_start)}" target="_blank" rel="noopener">YouTube ↗</a></dd>
-      </dl>`;
+      </dl>
+      <details class="tx"><summary>Transcript sent to Gemini (${a.transcript.length} lines, ${a.chat_sent} chat messages)</summary>
+        <ol>${a.transcript.map((l) => `<li class="${l.n >= Math.min(a.start_line, a.end_line) && l.n <= Math.max(a.start_line, a.end_line) ? "in" : ""}">
+          <button class="ts" data-t="${l.start}">${clock(l.start)}</button><span class="muted small">L${l.n}</span> ${esc(l.text)}</li>`).join("")}</ol>
+      </details>`;
     $("playBest").onclick = () => seek(a.best_start);
+    box.querySelector(".tx ol").onclick = (e) => { const b = e.target.closest(".ts"); if (b) seek(+b.dataset.t); };
   } else if (w.loading) {
-    box.innerHTML = '<p class="ai-wait"><span class="spin"></span>Gemini is watching the clip… (about 1 minute)</p>';
+    box.innerHTML = '<p class="ai-wait"><span class="spin"></span>Gemini is reading what was said and what chat wrote… (usually under a minute, up to a few minutes when the free tier is busy)</p>';
   } else if (!w.has_key) {
     box.innerHTML = '<p class="muted small">Add <code>GEMINI_API_KEY=…</code> to the project\'s <code>.env</code> file to get Gemini\'s explanation (free key: aistudio.google.com → Get API key).</p>';
   } else {
     box.innerHTML = `${w.ai_error ? `<p class="err small">${esc(w.ai_error)}</p>` : ""}
-      <button class="askbtn" id="askGemini">Ask Gemini why this could go viral</button>`;
+      <button class="askbtn" id="askGemini">Check with AI and find the exact clip</button>
+      <p class="muted small">Sends only text to Gemini (free tier): what the streamer says 1 minute before and after, plus the chat of this spike. No video.</p>`;
     $("askGemini").onclick = () => loadWhy(s, true);
   }
 }

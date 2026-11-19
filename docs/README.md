@@ -42,20 +42,39 @@ Options: `--window 10 --threshold 2.5 --min-score 8 --lead 20 --tail 15 --refres
 Results are saved in `output/<video-id>/` (`chart.html`, `spikes.csv`, `windows.csv`).
 The chat is saved in `data/raw/<video-id>.jsonl`, so opening the same stream again is instant.
 
-## Why did chat explode? (Gemini)
+## Why did chat explode? (free evidence + optional AI check)
 
-Click a moment and the **"Why did chat explode?"** card shows:
+Click a moment and the **"Why did chat explode?"** card shows **free chat evidence**
+(no AI, counted on your Mac, `evidence.py`):
 
-1. **Free chat evidence** (no AI, counted on your Mac, `evidence.py`):
-   - reaction mix (😂 Funny / 😱 Shock / 🔥 Win / 💔 Fail / 🎉 Hype, from word lists)
-   - words that stand out: said by at least 3 different people and 3× more than in the rest of the stream
-   - the message repeated most word for word
-2. **Gemini's answer** (`gemini.py`): Gemini watches the clip (picture + sound) and reads the evidence, then returns
-   what happened, why chat reacted, why it could go viral, a **viral score 1–10**, type, title, hook line,
-   and the **best start/end** for the clip (▶ plays it).
+- reaction mix (😂 Funny / 😱 Shock / 🔥 Win / 💔 Fail / 🎉 Hype, from word lists)
+- words that stand out: said by at least 3 different people and 3× more than in the rest of the stream
+- the message repeated most word for word
 
-The top 3 moments are sent to Gemini automatically after the analysis. Any other moment has an
-"Ask Gemini" button. Answers are saved in `data/processed/why/`, so nothing is asked twice.
+### "Check with AI and find the exact clip" (button, optional)
+
+Nothing goes to AI unless you press the button on a moment. Then Gemini gets **text only, no video**:
+
+1. **What the streamer says** from 1 minute before to 1 minute after the spike: YouTube's captions
+   (`transcript.py`), as numbered lines with their stream time. Downloaded once per stream in about 10 s,
+   saved in `data/raw/<id>.words.json` with a time for every word.
+2. **Every chat message of the spike** with its time (bots and `!commands` left out), plus chat messages per 10 s
+   over the 2 minutes.
+
+Gemini answers: what happened, why chat reacted, why it could go viral, a **viral score 1–10**, type, title,
+hook line, and **where to cut**: the line and the exact words the clip starts with and ends with.
+
+**How the cut times are made exact:** Gemini doesn't give times (it could make them up). It picks the start
+and end *lines* and copies the words. The app finds those words in YouTube's captions and takes their time,
+to about half a second, plus a small margin (0.3 s before, 0.7 s after). The card shows
+"Start when they say …" / "End after …" with a ▶ button that plays the cut, and the transcript that was sent
+(the chosen lines highlighted).
+
+Limits: if the moment is mostly visual (a stunt, something on screen), the transcript can't show it.
+Gemini then says so and gives low confidence. Streams without captions can't be cut this way.
+
+Answers are saved in `data/processed/why/`, so the same moment never uses quota twice.
+About 9,000 tokens per check on a very busy stream.
 
 ### Setup
 
@@ -69,24 +88,20 @@ GEMINI_API_KEY=your-key
 
 ### Which model (free tier)
 
-Chosen from Google's pricing and models pages (Nov 2026): free tier + accepts video.
-The app tries them in this order and moves to the next one if a model's free quota is used up:
+From Google's pricing and models pages (Nov 2026), all on the free tier. Tried in this order:
 
-1. `gemini-4-hydrogen` (newest generation, free, video)
+1. `gemini-4-hydrogen` (newest generation)
 2. `gemini-3.8-flash`
 3. `gemini-3.6-flash`
 4. `gemini-3.5-flash-lite`
 
-### How it stays within the free tier
+The free models are often busy ("503 high demand"). The app tries each model at most twice and waits at most
+60 s for an answer, then moves to the next. If a model's daily free quota is used up, it skips that model
+for the rest of the run. Each step is printed in the terminal (`[gemini …]`).
+Free-tier requests may be used by Google to improve its products (public stream content here).
 
-- Only the clip is downloaded (`data/processed/clips/`, ~3 MB at 360p for 45 s) and sent to Gemini.
-  Not the YouTube link: a developer report (Aug 2026) says Gemini may then process the audio of the
-  whole stream, which would use up the free quota.
-- Low video resolution (about 3× fewer tokens).
-- One request at a time, at least 13 s apart. On "too many requests" it waits and retries.
-  If a model's daily limit is reached, it moves to the next model.
-- Only 3 moments automatically.
-- Free-tier requests may be used by Google to improve its products (public stream content here).
+Tested 2026-11-19 on IShowSpeed: `gemini-4-hydrogen` answered after about 4 min of busy retries;
+another moment fell back to `gemini-3.5-flash-lite`, which answered in 3 s.
 
 ## How long the download takes
 
@@ -132,7 +147,8 @@ The page shows a clear message for each case.
 | `src/chat_spikes/replay.py` | Downloads chat replay with yt-dlp, reads it while it downloads, saves a compact copy |
 | `src/chat_spikes/detector.py` | Windows, rules, spike detection |
 | `src/chat_spikes/evidence.py` | Free chat evidence per moment: standout words, reaction type, top message |
-| `src/chat_spikes/gemini.py` | Clip download + Gemini "why" answer, model fallback, free-tier pacing, saved answers |
+| `src/chat_spikes/transcript.py` | Captions of the stream with a time per word (yt-dlp), cut into numbered lines |
+| `src/chat_spikes/gemini.py` | Text-only Gemini check: what happened + exact cut from the captions, model fallback, saved answers |
 | `src/chat_spikes/report.py` | CSV files and the standalone chart |
 | `src/chat_spikes/web.py` | Local web server for the page (`chat-spikes-web`) |
 | `src/chat_spikes/webui/` | The page: `index.html`, `style.css`, `app.js` |

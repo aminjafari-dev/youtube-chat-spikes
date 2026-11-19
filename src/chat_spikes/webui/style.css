@@ -197,3 +197,19 @@ code { font-size: 12px; background: var(--bg); padding: 1px 5px; border-radius: 
 .vbadge { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; margin-left: 8px; background: var(--bg); border: 1px solid var(--border); font-variant-numeric: tabular-nums; }
 .vbadge.s2, .vbadge.s3 { background: var(--spike); border-color: var(--spike); color: #fff; }
 .vbadge.wait { color: var(--muted); }
+
+/* AI clip cut */
+.cut { border: 1px solid var(--spike); background: var(--spike-soft); border-radius: 10px; padding: 12px; margin: 4px 0 14px; display: flex; flex-direction: column; gap: 6px; }
+.cut-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.cut-label { font-weight: 650; }
+.playcut { font: inherit; font-weight: 650; font-variant-numeric: tabular-nums; background: var(--spike); color: #fff; border: 0; border-radius: 8px; padding: 6px 12px; cursor: pointer; }
+.cut-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.cut-why { margin: 2px 0 0; }
+.tx { margin-top: 12px; }
+.tx summary { cursor: pointer; color: var(--text-2); font-size: 12px; }
+.tx ol { list-style: none; margin: 8px 0 0; padding: 0; max-height: 260px; overflow: auto; font-size: 13px; display: flex; flex-direction: column; gap: 2px; }
+.tx li { padding: 1px 4px; border-radius: 4px; }
+.tx li.in { background: var(--spike-soft); }
+.tx .ts { font: inherit; font-size: 11px; color: var(--muted); background: none; border: 0; padding: 0 6px 0 0; cursor: pointer; font-variant-numeric: tabular-nums; }
+.tx .ts:hover { color: var(--accent); }
+.askbtn + .muted { margin: 8px 0 0; }
