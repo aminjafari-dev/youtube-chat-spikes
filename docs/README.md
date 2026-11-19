@@ -136,6 +136,53 @@ If the stream time looks wrong, open the live page once while the stream is live
 exact 0:00). Live lines are read in `live.py` → `parse_live_line()`: if YouTube changes the message format,
 that is the one place to fix.
 
+## Reels: a vertical clip of a moment (1080×1920)
+
+Each moment can become a reel for Shorts / Reels / TikTok:
+
+```
+┌──────────────┐
+│  face cam    │  top 672 px: the streamer's face cam, zoomed to the full width
+├──────────────┤
+│              │
+│  middle of   │  bottom 1248 px: the middle of the stream screen (the game)
+│  the screen  │
+│              │
+└──────────────┘
+```
+
+- **Finished stream page**: pick a moment → **🎬 Make a reel of this moment**.
+- **Live page**: "🎬 Make a reel of every new moment" is on by default. When a new spike is found, its reel is
+  made on its own. You can also make one by hand from any moment.
+- The moment list shows 🎬 when its reel is ready (🎬… while it is being made). The reel card plays it and has
+  **Download**, **Make again** and the face-cam box.
+- Saved in `data/clips/<video>/<peak>.mp4` (plus a `.jpg` frame and a `.json` with the times and the layout).
+- Each reel is a **Reel** job on the Activity panel: Wait for the video (live only) → Download the piece → Make the reel.
+  One reel is made at a time.
+- Needs **ffmpeg** (`brew install ffmpeg`). yt-dlp does all the downloading; ffmpeg only works on the
+  downloaded file on your Mac.
+
+### The face-cam box
+
+Where the face cam is depends on the streamer, so the box is saved in `data/clip_layouts.json`:
+for the stream (`video:<id>`) and, when there is a face cam, for the channel (default for its next streams).
+IShowSpeed's GTA 6 layout is built in (`clips.py` → `DEFAULT_LAYOUTS`).
+To change it: on a reel, press **Draw / Change the face-cam box**, drag a box on the frame, **Save and make again**.
+**No face cam** (e.g. an outdoor IRL stream) makes the whole reel from the middle of the screen, for that stream only.
+An optional `game` box (only in the JSON file) cuts off black bars around the game.
+
+### How the piece is downloaded
+
+- **Finished stream**: `yt-dlp --download-sections "*START-END"` downloads only those seconds (45 s took ~40 s).
+- **Live stream**: yt-dlp can't cut a time range of a stream that is still live, so the app reads YouTube's live
+  HLS feed, which keeps the last ~15 minutes. yt-dlp starts N two-second pieces back (`-live_start_index -N`).
+  The pieces are numbered from the start of the stream (`.../sq/4249/...`), so piece number × 2 s is the stream
+  time: the app knows exactly where the clip starts in the file. It waits until the end of the clip is on the feed.
+  Downloading from the live feed is slow: about 2× the clip length (a 45 s reel took ~2–4 minutes in all).
+- Right after a stream ends, YouTube processes the recording for a while ("post_live") and refuses downloads
+  (403). The reel then fails with a clear message: try again later from the Finished stream page.
+- Live moments older than ~14 minutes can't be cut from the live feed: make them after the stream ends.
+
 ## Why did chat explode? (free evidence + optional AI check)
 
 Click a moment and the **"Why did chat explode?"** card shows **free chat evidence**
@@ -259,6 +306,7 @@ The page shows a clear message for each case.
 | File | Job |
 |------|-----|
 | `src/chat_spikes/replay.py` | Downloads chat replay with yt-dlp, reads it while it downloads, saves a compact copy |
+| `src/chat_spikes/clips.py` | Reels: download the piece (yt-dlp), face cam on top + middle of the screen below (ffmpeg), queue, layouts |
 | `src/chat_spikes/live.py` | Live mode: yt-dlp live chat reader, stream time, real-time detection, reconnects, saving |
 | `src/chat_spikes/detector.py` | Windows, rules, spike detection |
 | `src/chat_spikes/evidence.py` | Free chat evidence per moment: standout words, reaction type, top message |

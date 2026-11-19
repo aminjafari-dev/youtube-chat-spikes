@@ -28,6 +28,8 @@ const view = createSpikeView({
   },
   seek: (t) => seekStream(t),
   aiMode: "chat",
+  pollClips: true,   // reels of new moments are made on their own (auto reels)
+  onClips: (d) => { if (d.auto !== null && $("aClip")) $("aClip").checked = d.auto; },
   noMoments: "No spikes yet. They show up here as they happen.",
   onSelect: () => setChatTab("moment"),
   // Right edge: chat that is still on its way (YouTube → yt-dlp → app takes ~10–15 s, plus the 10 s window).
@@ -92,7 +94,11 @@ $("chartTools").addEventListener("click", (e) => {
 
 $("momentTools").innerHTML = `<div class="alerts small">
   <label><input type="checkbox" id="aSound" ${alerts.sound ? "checked" : ""}> 🔔 Sound on a new moment</label>
-  <label><input type="checkbox" id="aNotify" ${alerts.notify ? "checked" : ""}> Notification (when this tab is hidden)</label></div>`;
+  <label><input type="checkbox" id="aNotify" ${alerts.notify ? "checked" : ""}> Notification (when this tab is hidden)</label>
+  <label title="A 1080×1920 reel (face cam on top, game below) of every new moment, made on your Mac"><input type="checkbox" id="aClip" checked> 🎬 Make a reel of every new moment</label></div>`;
+$("aClip").addEventListener("change", (e) => {
+  if (vid) fetch(`/api/clip/auto?v=${vid}&on=${e.target.checked ? 1 : 0}`).then((r) => r.json()).then((d) => view.loadClips(d));
+});
 $("aSound").addEventListener("change", (e) => { alerts.sound = e.target.checked; store.set("liveSound", alerts.sound ? "1" : "0"); if (alerts.sound) beep(); });
 $("aNotify").addEventListener("change", async (e) => {
   alerts.notify = e.target.checked;
@@ -229,6 +235,7 @@ function connect(id) {
   history.replaceState(null, "", `?v=${id}`);
   es = new EventSource(`/api/live/feed?v=${id}`);
   es.onmessage = (e) => handle(JSON.parse(e.data));
+  view.loadClips();
   es.onerror = () => {
     // EventSource retries on its own; the watch keeps running on the app meanwhile.
     if (!finished) setStatus("Lost connection to the app. Retrying… (is it still running in the terminal?)", true);

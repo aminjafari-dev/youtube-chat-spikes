@@ -349,3 +349,21 @@ code { font-size: 12px; background: var(--bg); padding: 1px 5px; border-radius: 
 .unseen { background: var(--live); color: #fff; border-radius: 999px; font-size: 10px; padding: 0 6px; margin-left: 4px; }
 .moment.fresh { border-color: var(--live); box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 25%, transparent); animation: flash 2s 2; }
 .newtag { font-size: 10px; font-weight: 700; color: #fff; background: var(--live); border-radius: 4px; padding: 1px 6px; margin-left: 6px; }
+
+/* ---- Reels ---- */
+.clipcard { border-color: var(--accent, var(--spike)); }
+.reel-wrap { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+.reel { width: 240px; max-width: 100%; aspect-ratio: 9 / 16; background: #000; border-radius: 12px; }
+.reel-side { flex: 1 1 200px; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.reel-side p { margin: 0; }
+.reel-side a.askbtn { text-decoration: none; }
+.ghostbtn { font: inherit; background: transparent; color: var(--text); border: 1px solid var(--border); border-radius: 10px; padding: 7px 14px; cursor: pointer; }
+.ghostbtn:hover { border-color: var(--text); }
+.cbadge { font-size: 12px; margin-left: 4px; }
+.cbadge.wait { opacity: .6; }
+.cbadge.err { filter: grayscale(1); }
+.boxedit { margin-top: 14px; }
+.frame { position: relative; user-select: none; touch-action: none; cursor: crosshair; border-radius: 8px; overflow: hidden; }
+.frame img { display: block; width: 100%; pointer-events: none; }
+.facebox { position: absolute; border: 2px solid #ffd400; background: rgba(255, 212, 0, .18); box-shadow: 0 0 0 9999px rgba(0, 0, 0, .35); }
+.boxbtns { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }

@@ -82,6 +82,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.why(qs)
         if u.path.startswith("/api/live/"):
             return self.live_api(u.path.rsplit("/", 1)[-1], qs)
+        if u.path.startswith("/api/clip/"):
+            return self.clip_api(u.path.rsplit("/", 1)[-1], qs)
+        if u.path.startswith("/clips/"):
+            return self.send_clip(u.path)
         name = "index.html" if u.path in ("/", "") else u.path.lstrip("/")
         f = (WEB / name).resolve()
         if WEB.resolve() not in f.parents or not f.is_file():
@@ -302,6 +306,76 @@ class Handler(BaseHTTPRequestHandler):
                 w.stop()
             return self.send_json({"ok": bool(w)})
         self.send_error(404)
+
+    def clip_api(self, action: str, qs: dict) -> None:
+        """Reels of moments (clips.py): make one, list them, change the face-cam box, auto clips on/off."""
+        from . import clips
+        from .replay import cached
+
+        g = lambda k, d="": (qs.get(k) or [d])[0].strip()
+        vid = g("v")
+        if video_id_from_or_none(vid) != vid:
+            return self.send_json({"error": "bad video"})
+        w = live.get(vid)
+        info = cached(vid, include_running=True)
+        channel = (w.info.channel if w and w.info else "") or (info.channel if info else "")
+        title = (w.info.title if w and w.info else "") or (info.title if info else "")
+        try:
+            if action == "make":
+                m = {k: float(g(k, "0")) for k in ("peak", "clip_start", "clip_end")}
+                if m["clip_end"] - m["clip_start"] < 3 or m["clip_end"] - m["clip_start"] > 180:
+                    return self.send_json({"error": "A clip must be 3 s to 3 min long."})
+                clips.make(vid, m, channel, title)
+            elif action == "layout":
+                box = lambda k: None if g(k, "none") == "none" else [float(x) for x in g(k).split(",")]
+                old = clips.layout_for(channel, vid)
+                face = box("face") if "face" in qs else old["face"]
+                # No face cam (outdoor stream...): no game box either, unless one is given.
+                clips.save_layout(channel, vid, face, box("game") if "game" in qs else old["game"] if face else None)
+            elif action == "auto":
+                if w:
+                    w.auto_clip = g("on") == "1"
+            elif action != "list":
+                return self.send_error(404)
+        except (ValueError, clips.ClipError) as e:
+            return self.send_json({"error": str(e) or "bad value"})
+        self.send_json({"clips": clips.jobs(vid), "channel": channel, "layout": clips.layout_for(channel, vid),
+                        "auto": bool(w and w.auto_clip) if w else None})
+
+    def send_clip(self, path: str) -> None:
+        """data/clips/<video>/<peak>.mp4|.jpg, with Range support so the video can be scrubbed."""
+        from .clips import CLIPS
+        f = (CLIPS / path[len("/clips/"):]).resolve()
+        if CLIPS.resolve() not in f.parents or f.suffix not in (".mp4", ".jpg") or not f.is_file():
+            return self.send_error(404)
+        size = f.stat().st_size
+        ctype = "video/mp4" if f.suffix == ".mp4" else "image/jpeg"
+        a, b = 0, size - 1
+        rng = self.headers.get("Range", "")
+        if rng.startswith("bytes="):
+            lo, _, hi = rng[6:].split(",")[0].partition("-")
+            a = int(lo) if lo else max(0, size - int(hi))
+            b = int(hi) if lo and hi else size - 1
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {a}-{b}/{size}")
+        else:
+            self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(b - a + 1))
+        self.send_header("Cache-Control", "no-cache")
+        if "download=1" in self.path:
+            self.send_header("Content-Disposition", f'attachment; filename="{f.parent.name}-{f.name}"')
+        self.end_headers()
+        try:
+            with f.open("rb") as fh:
+                fh.seek(a)
+                left = b - a + 1
+                while left > 0 and (chunk := fh.read(min(1 << 16, left))):
+                    self.wfile.write(chunk)
+                    left -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def send_json(self, data) -> None:
         self.send_bytes(json.dumps(data, ensure_ascii=False).encode(), "application/json")

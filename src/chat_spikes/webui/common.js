@@ -34,6 +34,14 @@ const PARTS = {
       <div id="whyEvidence" class="evidence"></div>
       <div id="whyAi" class="ai"></div>
     </div>`,
+  clip: () => `
+    <div class="card clipcard" id="clipCard" hidden>
+      <div class="card-head">
+        <h2 id="clipTitle">Reel</h2>
+        <span class="muted small" id="clipInfo"></span>
+      </div>
+      <div id="clipBody"></div>
+    </div>`,
   chart: (el) => `
     <div class="card">
       <div class="card-head">
@@ -141,8 +149,9 @@ export function createSpikeView(opts) {
   const ytAt = (sec) => `https://www.youtube.com/watch?v=${v.vid}&t=${Math.max(0, Math.floor(sec))}s`;
 
   v.reset = () => {
-    v.windows = []; v.moments = []; v.selected = null; v.why = {}; v.fresh = new Set();
+    v.windows = []; v.moments = []; v.selected = null; v.why = {}; v.fresh = new Set(); v.clips = {};
     $("whyCard").hidden = true;
+    if ($("clipCard")) $("clipCard").hidden = true;
     $("moments").innerHTML = '<li class="muted">Nothing yet.</li>';
     $("momentCount").textContent = "";
     $("chat").innerHTML = '<li class="muted">Pick a moment to read what chat said.</li>';
@@ -176,7 +185,7 @@ export function createSpikeView(opts) {
     $("moments").innerHTML = list.map((s, i) => `
       <li class="moment${v.selected === s.peak ? " sel" : ""}${v.fresh.has(s.peak) ? " fresh" : ""}" data-i="${i}">
         <div class="row"><span class="rank">#${i + 1}</span><span class="time">${clock(s.peak)}</span>
-          ${v.fresh.has(s.peak) ? '<span class="newtag">NEW</span>' : ""}${badge(s)}
+          ${v.fresh.has(s.peak) ? '<span class="newtag">NEW</span>' : ""}${badge(s)}${clipBadge(s)}
           <span class="ratio">${Math.round(s.score)} msgs · ${s.ratio}× · ${s.people} people</span></div>
         <div class="clip">Clip ${clock(s.clip_start)} → ${clock(s.clip_end)} (${Math.round(s.clip_end - s.clip_start)} s)
           · <a href="${ytAt(s.clip_start)}" target="_blank" rel="noopener">YouTube ↗</a></div>
@@ -203,6 +212,7 @@ export function createSpikeView(opts) {
     v.drawChart();
     if (play) opts.seek(s.clip_start);
     renderWhy(s);
+    renderClip(s);
     if (!v.why[s.peak] || !v.why[s.peak].evidence) loadWhy(s, false);
     if (opts.onSelect) opts.onSelect(s);
     $("chatTitle").textContent = `Chat at ${clock(s.clip_start)} → ${clock(s.clip_end)}`;
@@ -310,6 +320,129 @@ export function createSpikeView(opts) {
     }
     const ask = $("askGemini");
     if (ask) ask.onclick = () => loadWhy(s, true);
+  }
+
+  // ---- Reels (clips.py): face cam on top, the middle of the screen below, 1080×1920 ----
+  v.clips = {}; v.clipLayout = null; v.clipChannel = "";
+  const cname = (s) => String(Math.round(s.peak));
+  const clipOf = (s) => v.clips[cname(s)];
+  const ACTIVE = ["queued", "waiting", "working"];
+  let editing = false, clipTimer = null;
+
+  function clipBadge(s) {
+    const c = clipOf(s);
+    if (!c) return "";
+    if (ACTIVE.includes(c.state)) return '<span class="cbadge wait" title="Making the reel">🎬…</span>';
+    if (c.state === "done") return '<span class="cbadge" title="Reel ready">🎬</span>';
+    return '<span class="cbadge err" title="The reel failed">🎬!</span>';
+  }
+
+  v.loadClips = async (data) => {
+    if (!v.vid || !$("clipCard")) return;
+    try {
+      data ||= await (await fetch(`/api/clip/list?v=${v.vid}`)).json();
+    } catch { return; }
+    if (data.error) return;
+    const before = JSON.stringify(v.clips);
+    v.clips = data.clips || {}; v.clipLayout = data.layout; v.clipChannel = data.channel;
+    if (opts.onClips) opts.onClips(data);
+    if (JSON.stringify(v.clips) !== before) {
+      v.renderMoments();
+      const sel = v.moments.find((m) => m.peak === v.selected);
+      if (sel && !editing) renderClip(sel);
+    }
+    clearTimeout(clipTimer);
+    const busy = Object.values(v.clips).some((c) => ACTIVE.includes(c.state));
+    if (busy || opts.pollClips) clipTimer = setTimeout(() => v.loadClips(), busy ? 3000 : 8000);
+  };
+
+  async function clipCall(action, params) {
+    const q = new URLSearchParams({ v: v.vid, ...params });
+    const r = await (await fetch(`/api/clip/${action}?${q}`)).json();
+    if (r.error) throw new Error(r.error);
+    await v.loadClips(r);
+  }
+
+  const makeClip = (s) => clipCall("make", { peak: s.peak, clip_start: s.clip_start, clip_end: s.clip_end })
+    .catch((e) => { $("clipBody").insertAdjacentHTML("afterbegin", `<p class="err small">${esc(e.message)}</p>`); });
+
+  function renderClip(s) {
+    if (!$("clipCard")) return;
+    editing = false;
+    const c = clipOf(s), card = $("clipCard"), body = $("clipBody");
+    card.hidden = false;
+    $("clipTitle").textContent = `Reel of ${clock(s.peak)}`;
+    const face = v.clipLayout && v.clipLayout.face;
+    $("clipInfo").textContent = `${clock(s.clip_start)} → ${clock(s.clip_end)} · 1080×1920`;
+    const layoutNote = face ? `Face cam of <b>${esc(v.clipChannel || "this channel")}</b> on top, the middle of the screen below.`
+      : `No face cam in this stream's reels: only the middle of the screen. If there is a face cam, draw its box on a frame of a reel.`;
+    if (!c) {
+      body.innerHTML = `<button class="askbtn" id="clipMake">🎬 Make a reel of this moment</button>
+        <p class="muted small">${layoutNote} yt-dlp downloads only these ${Math.round(s.clip_end - s.clip_start)} seconds; ffmpeg makes the reel on your Mac.</p>`;
+      $("clipMake").onclick = () => makeClip(s);
+    } else if (ACTIVE.includes(c.state)) {
+      body.innerHTML = `<p class="ai-wait"><span class="spin"></span>${c.state === "queued" ? "In the queue" : c.state === "waiting" ? "Waiting for the live video" : "Making the reel"}… ${esc(c.note || "")}</p>
+        <p class="muted small">Follow each step on the Activity panel.</p>`;
+    } else if (c.state === "error") {
+      body.innerHTML = `<p class="err small">The reel failed: ${esc(c.note)}</p><button class="askbtn" id="clipMake">Try again</button>`;
+      $("clipMake").onclick = () => makeClip(s);
+    } else {
+      const src = `/clips/${v.vid}/${cname(s)}`;
+      const stamp = Math.round(c.made || 0);
+      body.innerHTML = `
+        <div class="reel-wrap">
+          <video class="reel" src="${src}.mp4?t=${stamp}" controls playsinline preload="metadata"></video>
+          <div class="reel-side">
+            <a class="askbtn" href="${src}.mp4?download=1&t=${stamp}">⬇ Download</a>
+            <button class="ghostbtn" id="clipRemake">Make again</button>
+            <p class="muted small">${layoutNote}</p>
+            <button class="ghostbtn" id="clipBox">${face ? "Change" : "Draw"} the face-cam box</button>
+            <p class="muted small">Saved in <code>data/clips/${esc(v.vid)}/${cname(s)}.mp4</code></p>
+          </div>
+        </div>
+        <div class="boxedit" id="boxEdit" hidden>
+          <p class="small">Drag a box around the face cam on this frame. It is saved for this stream${v.clipChannel ? ` and for the next streams of <b>${esc(v.clipChannel)}</b>` : ""}.</p>
+          <div class="frame" id="frame"><img src="${src}.jpg?t=${stamp}" alt="A frame of the stream" draggable="false"><div class="facebox" id="faceBox" hidden></div></div>
+          <div class="boxbtns"><button class="askbtn" id="boxSave" disabled>Save and make again</button>
+            <button class="ghostbtn" id="boxNone">No face cam</button><button class="ghostbtn" id="boxCancel">Cancel</button></div>
+        </div>`;
+      $("clipRemake").onclick = () => makeClip(s);
+      $("clipBox").onclick = () => boxEditor(s, face);
+    }
+  }
+
+  function boxEditor(s, face) {
+    editing = true;
+    $("boxEdit").hidden = false;
+    const frame = $("frame"), fb = $("faceBox");
+    let box = face ? [...face] : null, start = null;
+    const show = () => {
+      fb.hidden = !box;
+      if (box) Object.assign(fb.style, { left: `${box[0] * 100}%`, top: `${box[1] * 100}%`, width: `${box[2] * 100}%`, height: `${box[3] * 100}%` });
+    };
+    const at = (e) => {
+      const r = frame.getBoundingClientRect();
+      return [Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), Math.min(1, Math.max(0, (e.clientY - r.top) / r.height))];
+    };
+    show();
+    frame.onpointerdown = (e) => { start = at(e); frame.setPointerCapture(e.pointerId); e.preventDefault(); };
+    frame.onpointermove = (e) => {
+      if (!start) return;
+      const p = at(e);
+      box = [Math.min(start[0], p[0]), Math.min(start[1], p[1]), Math.abs(p[0] - start[0]), Math.abs(p[1] - start[1])];
+      show();
+      $("boxSave").disabled = box[2] < 0.03 || box[3] < 0.03;
+    };
+    frame.onpointerup = () => { start = null; };
+    const save = async (val) => {
+      try {
+        await clipCall("layout", { face: val });
+        await makeClip(s);
+      } catch (e) { $("boxEdit").insertAdjacentHTML("afterbegin", `<p class="err small">${esc(e.message)}</p>`); }
+    };
+    $("boxSave").onclick = () => save(box.map((x) => x.toFixed(4)).join(","));
+    $("boxNone").onclick = () => save("none");
+    $("boxCancel").onclick = () => renderClip(s);
   }
 
   // ---- Chart: bars grouped so it stays readable ----

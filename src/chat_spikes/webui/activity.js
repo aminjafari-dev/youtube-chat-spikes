@@ -8,7 +8,7 @@
   let dirty = false;
 
   const KIND = { analyze: { icon: "📈", name: "Analyze stream" }, evidence: { icon: "💬", name: "Chat evidence" },
-    ai: { icon: "🤖", name: "AI check" }, live: { icon: "🔴", name: "Live watch" } };
+    ai: { icon: "🤖", name: "AI check" }, live: { icon: "🔴", name: "Live watch" }, clip: { icon: "🎬", name: "Reel" } };
   const STATUS = { waiting: "waiting", running: "running", done: "done", error: "failed", skipped: "skipped", cancelled: "cancelled", queued: "queued" };
   const ICON = { waiting: "○", running: "", done: "✓", error: "✕", skipped: "–", cancelled: "■", queued: "…" };
 

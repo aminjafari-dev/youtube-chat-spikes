@@ -243,6 +243,7 @@ class Watch:
         self._quiet = False                # True while rebuilding from the saved file (no "new moment" logs)
         self._new_start: float | None = None
         self.epoch = 0                     # +1 when all times change (sync): pages reload everything
+        self.auto_clip = True              # make a reel of every new moment (clips.py)
         self.run = activity.start("live", f"Live watch · {video_id}", {"video": video_id}, STEPS)
         self.thread = threading.Thread(target=self._main, name=f"live-{video_id}", daemon=True)
 
@@ -435,6 +436,9 @@ class Watch:
                 if m["peak"] >= self._resume_t:
                     self.run.step("detect").log(f"new moment at {hms(m['peak'])}: {m['score']:.0f} per 10 s, "
                                                 f"{m['ratio']}× normal")
+                    if self.auto_clip and self.info:
+                        from . import clips
+                        clips.make(self.vid, m, self.info.channel, self.info.title, auto=True)
         self.run.step("detect").detail(f"{len(self.det.windows):,} windows checked · {len(self.moments)} moments")
 
     def _take(self, msgs: list[tuple[float, str, str, str]]) -> int:

@@ -104,6 +104,7 @@ function handle({ type, data }) {
       updateTiles();
       view.renderMoments();
       view.drawChart();
+      view.loadClips();
       if (view.moments.length) view.selectMoment(view.moments[0], false);
       break;
     case "error": setStatus(data, true); setProgress(null); finish(); break;
