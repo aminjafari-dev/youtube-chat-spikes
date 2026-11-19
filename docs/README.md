@@ -3,7 +3,7 @@
 - **Started:** 2026-11-17
 - **Branches:** `finished-streams` (finished streams only), `live-mode` (adds live mode, 2026-11-19).
   The old live version on `main` uses the official YouTube Data API and is not used any more.
-- **Status:** Working. Two modes on the start page:
+- **Status:** Working. One window with browser-style tabs, one stream per tab (2026-11-19). Two modes:
   - **Finished stream (video):** paste a stream that has ended, get its biggest chat spikes as moments to clip.
   - **Live stream:** watch a stream while it is live; spikes show up in real time.
 - **Part of:** [twitch-chat-clipper](../../twitch-chat-clipper/docs/README.md) (Option A: rules only, no AI, $0)
@@ -25,8 +25,48 @@ cd /Volumes/Development/claude/projects/youtube-chat-spikes
 uv run chat-spikes-web
 ```
 
-Opens http://localhost:8765, the start page: choose **Live stream** or **Finished stream (video)**.
+Opens http://localhost:8765: a window with tabs, like a browser. A new tab shows the start page: choose
+**Live stream** or **Finished stream (video)**, or open one of the **Saved streams**.
 On the finished page, paste a link and press **Analyze** (or open `finished.html?v=VIDEO_ID`).
+
+### Tabs: several streams at once
+
+- **+** opens a new tab. Watch a different stream in each one (5, 10…); each live watch runs on the app by itself.
+- Click a tab to show it, **×** (or middle-click) to close it, drag to reorder. Tabs come back after a reload
+  (remembered in this browser).
+- Tab icons: red dot = live watch running, grey dot = live watch stopped, ▶ = finished stream.
+  An orange number on a tab = new spikes since you last looked at it (the window title shows the total).
+- **Only the tab on screen keeps its live connection.** A browser allows just 6 connections to one app, so
+  background tabs disconnect (and pause their player); the watches keep recording on the app. Switching back
+  reconnects and redraws everything. So "Sound/Notification on a new moment" only fires for the tab on screen;
+  the tab badges cover the others.
+- Closing the tab of a running live watch asks: **Close tab, keep watching** (it keeps recording; reopen it from
+  "Being watched now" in a new tab) or **Stop watching and close**.
+- Opening a stream that is already open in another tab switches to that tab.
+- `index.html`, `live.html` and `finished.html` still work on their own, without the tabs.
+
+### Where everything is saved: one folder per stream, grouped by channel
+
+```
+streams/
+  <Channel>/
+    <YYYY-MM-DD> <Title> [<video id>]/
+      stream.json      title, channel, link, start, live and/or finished
+      chat/            replay.jsonl (finished), live.jsonl (live mode), *.meta.json, words.json (captions)
+      results/         chart.html, spikes.csv, windows.csv
+      ai/              saved AI answers and hooks
+      clips/           reels (.mp4) + frame (.jpg) + info (.json)
+```
+
+- The **Saved streams** list on the start page shows this library by channel, with a filter and **Show folder**
+  (opens the stream's folder in Finder).
+- A stream is filed as soon as the app knows its title and channel. The folder never moves after that, even if
+  the streamer changes the title. The date is the stream's start (live) or release date (finished).
+- Not per stream: `data/clip_layouts.json` (face-cam boxes, per channel), `data/processed/activity.jsonl`
+  (Activity history), and `data/raw/` (temp folders of running yt-dlp jobs only, deleted when they end).
+- **Moving from the old layout:** on start, the app moves anything still in `data/raw/`, `data/clips/`,
+  `data/processed/why/` and `output/<id>/` into `streams/` (code: `library.py`, `migrate()`). Folders in
+  `output/` that aren't a video id (tests, demos) stay where they are.
 
 - **Progress bar** while the chat downloads. The chart and moments fill in as it goes.
 - **Chart of the whole stream**: orange = spike, numbered dots = top 5. Click anywhere to jump the video there.
@@ -43,8 +83,8 @@ uv run chat-spikes "https://www.youtube.com/watch?v=VIDEO_ID" --top 10
 
 Options: `--window 10 --threshold 2.5 --min-score 8 --lead 20 --tail 15 --refresh`
 
-Results are saved in `output/<video-id>/` (`chart.html`, `spikes.csv`, `windows.csv`).
-The chat is saved in `data/raw/<video-id>.jsonl`, so opening the same stream again is instant.
+Results are saved in the stream's folder, `results/` (`chart.html`, `spikes.csv`, `windows.csv`).
+The chat is saved in `chat/replay.jsonl` there, so opening the same stream again is instant.
 
 ## Live mode
 
@@ -71,9 +111,9 @@ Press **Live stream** on the start page, paste the link of a stream that is live
   so the hole doesn't look like a spike.
 - **Runs on the app, not in the page.** Closing or reloading the page doesn't stop it; the page reconnects
   (`live.html?v=VIDEO_ID`, or the start page's "Being watched now" list).
-- **Saved while it runs:** `data/raw/<id>.live.jsonl` (same format as the replay copy) and
-  `<id>.live.meta.json`. Press **Watch live** again later and it continues the same file.
-  When it stops: `output/<id>/` gets `windows.csv`, `spikes.csv`, `chart.html`.
+- **Saved while it runs:** the stream's folder, `chat/live.jsonl` (same format as the replay copy) and
+  `chat/live.meta.json`. Press **Watch live** again later and it continues the same file.
+  When it stops: `results/` gets `windows.csv`, `spikes.csv`, `chart.html`.
 - **Finished-stream mode reads the live recording instantly** when there is no full replay copy
   (status says "chat recorded in live mode from …"). It only has the chat from when you started watching.
 - **Stops** when you press **Stop**, or by itself when the stream ends. Then the page links to the finished-stream page.
@@ -95,7 +135,7 @@ Press **Live stream** on the start page, paste the link of a stream that is live
 
 YouTube makes captions only after the stream is processed, so in live mode **"Check with AI (chat only)"**
 sends Gemini only the chat of the spike and chat per 10 s (no transcript, no exact cut). Saved as
-`data/processed/why/<id>/<time>.chat.json`. After the stream ends, open it in Finished stream mode:
+the stream's `ai/<time>.chat.json`. After the stream ends, open it in Finished stream mode:
 the same moment shows the chat-only answer plus a **Full check with captions and exact cut** button.
 
 ### Activity: "Live watch" job
@@ -156,7 +196,7 @@ Each moment can become a reel for Shorts / Reels / TikTok:
   made on its own. You can also make one by hand from any moment.
 - The moment list shows 🎬 when its reel is ready (🎬… while it is being made). The reel card plays it and has
   **Download**, **Make again** and the face-cam box.
-- Saved in `data/clips/<video>/<peak>.mp4` (plus a `.jpg` frame and a `.json` with the times and the layout).
+- Saved in the stream's `clips/<peak>.mp4` (plus a `.jpg` frame and a `.json` with the times and the layout).
 - Each reel is a **Reel** job with 7 connected nodes: In line → Check the stream → Wait for the video (live only) →
   Download the piece → Write the hook → Make the reel → Save. Download and Make the reel show a progress bar. The same nodes show
   inside the reel card, with **Open this job in Activity** and **Cancel**. One reel is made at a time.
@@ -165,7 +205,7 @@ Each moment can become a reel for Shorts / Reels / TikTok:
   that tells a stranger what the clip is and why to keep watching (based on what really happens). It is drawn
   as bold near-black San Francisco text with Apple colour emoji on a white rounded box with a soft shadow (made
   with Pillow, since this ffmpeg has no text filter), shows for the first 5 s and fades out (`HOOK_SECONDS` in
-  `clips.py`). Saved in `data/processed/why/<video>/<peak>.hook.json`, so remakes reuse it. On the reel card you can
+  `clips.py`). Saved in the stream's `ai/<peak>.hook.json`, so remakes reuse it. On the reel card you can
   type your own hook (**Use this hook**) or ask for **✨ New hook**. If Gemini fails, the reel is made without one.
 - **Best quality**: yt-dlp picks the highest resolution, then frame rate, then bitrate (`-S res,fps,br`), with no
   size limit. The reel is never scaled down: 1080×1920 from 1080p, 1440×2560 from 1440p, 2160×3840 from 4K (the
@@ -219,7 +259,7 @@ Nothing goes to AI unless you press the button on a moment. Then Gemini gets **t
 
 1. **What the streamer says** from 1 minute before to 1 minute after the spike: YouTube's captions
    (`transcript.py`), as numbered lines with their stream time. Downloaded once per stream in about 10 s,
-   saved in `data/raw/<id>.words.json` with a time for every word.
+   saved in the stream's `chat/words.json` with a time for every word.
 2. **Every chat message of the spike** with its time (bots and `!commands` left out), plus chat messages per 10 s
    over the 2 minutes.
 
@@ -235,7 +275,7 @@ to about half a second, plus a small margin (0.3 s before, 0.7 s after). The car
 Limits: if the moment is mostly visual (a stunt, something on screen), the transcript can't show it.
 Gemini then says so and gives low confidence. Streams without captions can't be cut this way.
 
-Answers are saved in `data/processed/why/`, so the same moment never uses quota twice.
+Answers are saved in the stream's `ai/` folder, so the same moment never uses quota twice.
 About 9,000 tokens per check on a very busy stream.
 
 ### Setup
@@ -335,8 +375,9 @@ The page shows a clear message for each case.
 | `src/chat_spikes/gemini.py` | Text-only Gemini check: what happened + exact cut from the captions, model fallback, saved answers |
 | `src/chat_spikes/report.py` | CSV files and the standalone chart |
 | `src/chat_spikes/activity.py` | Records every job, its steps and every request; live feed for the Activity panel |
-| `src/chat_spikes/web.py` | Local web server for the pages (`chat-spikes-web`), incl. `/api/live/*` |
-| `src/chat_spikes/webui/` | `index.html` (start page), `finished.html` + `finished.js`, `live.html` + `live.js`, shared `common.js` (player, chart, moments, why card, chat), `activity.js`, `style.css` |
+| `src/chat_spikes/library.py` | The stream library: one folder per stream under `streams/<channel>/`, paths inside it, moving the old layout |
+| `src/chat_spikes/web.py` | Local web server for the pages (`chat-spikes-web`), incl. `/api/live/*`, `/api/library/*` |
+| `src/chat_spikes/webui/` | `app.html` + `app.js` (the window with tabs), `index.html` (start page / new tab, saved streams), `finished.html` + `finished.js`, `live.html` + `live.js`, shared `common.js` (player, chart, moments, why card, chat), `activity.js`, `style.css` |
 | `src/chat_spikes/cli.py` | Command line (`chat-spikes`) |
 
 ## Maintenance

@@ -39,7 +39,8 @@ def load_ignore_users() -> set[str]:
 
 
 def main() -> None:
-    from .replay import RAW, ReplayError, load
+    from .library import chat_file, migrate, results_dir
+    from .replay import ReplayError, load
 
     p = argparse.ArgumentParser(description="Find the biggest chat spikes in a finished YouTube stream.")
     p.add_argument("url", help="YouTube link of a stream that has ended")
@@ -53,8 +54,9 @@ def main() -> None:
     a = p.parse_args()
 
     vid = video_id_from(a.url)
+    migrate()
     if a.refresh:
-        for f in (RAW / f"{vid}.jsonl", RAW / f"{vid}.meta.json"):
+        for f in (chat_file(vid, "replay.jsonl"), chat_file(vid, "replay.meta.json")):
             f.unlink(missing_ok=True)
     rules = Rules(window=a.window, threshold=a.threshold, min_score=a.min_score,
                   lead=a.lead, tail=a.tail, ignore_users=load_ignore_users())
@@ -96,7 +98,7 @@ def main() -> None:
     det.flush()
 
     spikes = group_spikes(det.windows, rules)
-    out_dir = ROOT / "output" / vid
+    out_dir = results_dir(vid)
     out_dir.mkdir(parents=True, exist_ok=True)
     write_windows(out_dir / "windows.csv", det.windows)
     write_spikes(out_dir / "spikes.csv", spikes, vid)

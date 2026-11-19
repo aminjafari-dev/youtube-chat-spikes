@@ -7,6 +7,11 @@ const form = $("form"), btn = $("btn");
 const LIVE_CHAT_MAX = 300;
 
 let es = null, vid = null, shownVid = null, info = null;
+// Inside a tab of the app window: only the tab on screen keeps its live feed open (a browser allows just
+// 6 connections to one app, so 5+ live tabs could not all stay connected). The watch itself keeps running
+// on the app; the tab reconnects and gets everything again when you switch back to it.
+const embedded = window.top !== window;
+let active = true, wasAtHead = true;
 let stats = null, statsAt = 0, running = false, finished = false;
 let known = new Set();          // moments already seen (to spot new ones)
 let chatTab = "live", unseen = 0;
@@ -311,6 +316,7 @@ function connect(id) {
   if (es) es.close();
   vid = id; view.vid = id; finished = false;
   history.replaceState(null, "", `?v=${id}`);
+  if (!active) { es = null; return; }  // a background tab: connects when it is shown
   es = new EventSource(`/api/live/feed?v=${id}`);
   es.onmessage = (e) => handle(JSON.parse(e.data));
   view.loadClips();
@@ -367,7 +373,7 @@ function handle({ type, data }) {
       } else if (data.state === "error") {
         setStatus(`Stopped: ${data.note}`, true);
       } else {
-        setStatus(`Stopped. ${n} saved in data/raw/${vid}.live.jsonl. Press Watch live to continue.`);
+        setStatus(`Stopped. ${n} saved in this stream's folder (streams/<channel>/…/chat/live.jsonl). Press Watch live to continue.`);
       }
       $("livePill").hidden = true;
       $("busyDot").classList.remove("on");
@@ -404,11 +410,27 @@ form.addEventListener("submit", async (e) => {
 // Keep the clock, tiles and chart moving between updates.
 setInterval(() => { if (running) { updateTiles(); showState(); view.drawChart(); showPager(); } }, 1000);
 
+// The app window says when this tab is shown or hidden.
+window.addEventListener("message", (e) => {
+  if (e.source !== window.parent || !e.data || e.data.tab !== "active") return;
+  if (e.data.on === active) return;
+  active = e.data.on;
+  if (!active) {
+    if (es) { es.close(); es = null; }
+    wasAtHead = !!(player.info.progressState || {}).isAtLiveHead;
+    player.send("pauseVideo");
+  } else if (vid) {
+    connect(vid);
+    if (wasAtHead && shownVid) goLive(); else player.send("playVideo");
+  }
+});
+
 // Reload / come back: reconnect to the watch from the address (?v=), or to whatever is being watched now.
+// (Not in a new tab of the app window: that one starts empty.)
 const fromUrl = new URLSearchParams(location.search).get("v");
 setChatTab("live");
 if (fromUrl) connect(fromUrl);
-else {
+else if (!embedded) {
   const list = await (await fetch("/api/live/list")).json();
   const w = list.find((x) => x.running);
   if (w) connect(w.video_id);

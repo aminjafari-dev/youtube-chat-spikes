@@ -345,7 +345,7 @@ export function createSpikeView(opts) {
     } catch { return; }
     if (data.error) return;
     const before = JSON.stringify(v.clips);
-    v.clips = data.clips || {}; v.clipLayout = data.layout; v.clipChannel = data.channel;
+    v.clips = data.clips || {}; v.clipLayout = data.layout; v.clipChannel = data.channel; v.clipFolder = data.folder;
     if (opts.onClips) opts.onClips(data);
     if (JSON.stringify(v.clips) !== before) {
       v.renderMoments();
@@ -405,7 +405,7 @@ export function createSpikeView(opts) {
             ${c.source ? `<p class="muted small">Source: ${esc(c.source)}</p>` : ""}
             <p class="muted small">${layoutNote}</p>
             <button class="ghostbtn" id="clipBox">${face ? "Change" : "Draw"} the face-cam box</button>
-            <p class="muted small">Saved in <code>data/clips/${esc(v.vid)}/${cname(s)}.mp4</code></p>
+            <p class="muted small">Saved in <code>${esc(v.clipFolder || "clips")}/${cname(s)}.mp4</code></p>
           </div>
         </div>
         <div class="boxedit" id="boxEdit" hidden>

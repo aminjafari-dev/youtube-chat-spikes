@@ -23,7 +23,8 @@ Only yt-dlp downloads from YouTube (ffmpeg only works on the downloaded file on 
                     Older moments: YouTube still serves those pieces (the player's DVR, hours back), just not
                     in the playlist, so they are fetched by number (_download_pieces).
 
-Clips are saved in data/clips/<video>/<peak>.mp4 (+ .jpg, a frame of the full screen for the layout box).
+Clips are saved in the stream's folder (streams/<channel>/<date> <title> [<id>]/clips/<peak>.mp4)
+(+ .jpg, a frame of the full screen for the layout box).
 One clip is made at a time (a queue), and each one is a job on the Activity panel.
 """
 
@@ -43,10 +44,11 @@ import time
 from pathlib import Path
 
 from . import activity, replay
+from .library import clips_dir
 from .replay import ROOT, _last_error, _ytdlp
 from .report import hms
 
-CLIPS = ROOT / "data" / "clips"
+CLIPS = ROOT / "data" / "raw"  # temp logs only; reels go to the stream's folder, clips/ (library.py)
 LAYOUTS = ROOT / "data" / "clip_layouts.json"
 TOP_PART = 672 / 1920                    # the face-cam part on top (of the reel's height)
 CRF = 10                                 # x264 quality: 0 = lossless, ~17 = "looks the same"; 10 = no visible loss
@@ -79,7 +81,7 @@ STEPS = [
     ("render", "Make the reel", "ffmpeg on your Mac: face cam on top, the middle of the screen below, the hook "
      "between them for 5 s. Never scaled down; x264 CRF 10 (visually lossless)."),
     ("save", "Save", "Writes the reel (.mp4), a frame of the full screen (.jpg) and its info (.json) to "
-     "data/clips/<video>/ and deletes the temporary files."),
+     "the stream's clips/ folder and deletes the temporary files."),
 ]
 
 
@@ -174,12 +176,12 @@ def _name(peak: float) -> str:
 
 
 def clip_path(vid: str, peak: float) -> Path:
-    return CLIPS / vid / f"{_name(peak)}.mp4"
+    return clips_dir(vid) / f"{_name(peak)}.mp4"
 
 
 def saved(vid: str) -> dict[str, dict]:
     out = {}
-    d = CLIPS / vid
+    d = clips_dir(vid)
     for f in sorted(d.glob("*.json")) if d.exists() else []:
         try:
             info = json.loads(f.read_text())
@@ -722,7 +724,7 @@ def _make(j: dict) -> None:
     length = b - a
     j["state"] = "working"
     run.step("queue").done("its turn")
-    work = CLIPS / vid / f"_work_{j['peak_name']}"
+    work = clips_dir(vid) / f"_work_{j['peak_name']}"
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
     try:

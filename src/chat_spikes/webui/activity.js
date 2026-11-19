@@ -1,6 +1,14 @@
 // Activity panel: every job the app runs, as a flow of steps (done / running / next), plus every request.
 (() => {
   const $ = (id) => document.getElementById(id);
+  // Inside a tab of the app window (app.html): the window has the one Activity panel, so this page has none.
+  // (Each panel keeps a connection open, and a browser only allows 6 to one app.)
+  if (window.top !== window) {
+    document.body.classList.add("embed");
+    $("actToggle")?.remove();
+    $("activity")?.remove();
+    return;
+  }
   const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   const runs = new Map();     // id -> run
   let requests = [];

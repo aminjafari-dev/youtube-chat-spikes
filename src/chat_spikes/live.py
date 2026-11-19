@@ -21,9 +21,9 @@ finished-stream mode. Without an open page, release_timestamp is used.
 A watch runs on the server in its own thread: it keeps going when the page is reloaded or closed,
 and the page reconnects to it. It stops when you press Stop or when the stream ends.
 
-Saved in data/raw/ while it runs:
-    <id>.live.jsonl      [stream_seconds, author, text] per message (same format as <id>.jsonl)
-    <id>.live.meta.json  title, channel, start time, first/last message, running or not
+Saved in the stream's folder (library.py), chat/ while it runs:
+    live.jsonl      [stream_seconds, author, text] per message (same format as replay.jsonl)
+    live.meta.json  title, channel, start time, first/last message, running or not
 so finished-stream mode can open the recording instantly after the stream ends.
 """
 
@@ -43,7 +43,8 @@ from dataclasses import asdict, dataclass
 from . import activity, replay
 from .cli import load_ignore_users
 from .detector import Detector, Rules, Window, group_spikes
-from .replay import RAW, ROOT, _last_error, _text, _ytdlp
+from .library import chat_file, register, rel, results_dir
+from .replay import RAW, _last_error, _text, _ytdlp
 from .report import hms, ranked, save_outputs, window_row
 
 STALL_SECONDS = 60     # no new message for this long on a busy chat = something is wrong
@@ -206,8 +207,8 @@ STEPS = [
      f"{STALL_SECONDS} s, or yt-dlp stops, the app checks whether the stream ended and otherwise reconnects."),
     ("detect", "Find spikes", "Cuts chat into 10-second windows and compares each with the normal level of the last "
      "5 minutes (the same rules as finished streams). New moments show up while the stream is live."),
-    ("save", "Save", "Writes every message to data/raw/<id>.live.jsonl as it arrives. At the end, also "
-     "windows.csv, spikes.csv and chart.html in output/<id>/."),
+    ("save", "Save", "Writes every message to the stream's folder (streams/<channel>/<date> <title> [<id>]/chat/live.jsonl) "
+     "as it arrives. At the end, also windows.csv, spikes.csv and chart.html in results/ there."),
 ]
 
 
@@ -256,7 +257,7 @@ class Watch:
         i = self.info
         return {"video_id": self.vid, "title": i.title if i else "", "channel": i.channel if i else "",
                 "started": i.started if i else None, "state": self.state, "running": self.running,
-                "messages": self.total}
+                "messages": self.total, "moments": len(self.moments)}
 
     def stats(self) -> dict:
         now = time.time()
@@ -336,7 +337,7 @@ class Watch:
         i = self.info
         if not i:
             return
-        (RAW / f"{self.vid}.live.meta.json").write_text(json.dumps({
+        chat_file(self.vid, "live.meta.json").write_text(json.dumps({
             "title": i.title, "channel": i.channel, "started": i.started, "release": i.release,
             "synced": i.synced, "first": self.first_t or 0,
             "duration": self.last_t or 0, "messages": self.total, "running": running,
@@ -345,7 +346,7 @@ class Watch:
 
     def _resume(self) -> None:
         """Continue an earlier recording of the same stream (e.g. after the app was restarted)."""
-        path = RAW / f"{self.vid}.live.jsonl"
+        path = chat_file(self.vid, "live.jsonl")
         old = replay.live_meta(self.vid)
         if not path.exists():
             return
@@ -362,7 +363,7 @@ class Watch:
 
     def _load_file(self, shift: float = 0.0) -> int:
         """Rebuild everything from the saved recording (times moved by -shift)."""
-        path = RAW / f"{self.vid}.live.jsonl"
+        path = chat_file(self.vid, "live.jsonl")
         self.det = Detector(self.rules)
         self.rows, self.moments, self.total = [], [], 0
         self.chat.clear()
@@ -395,7 +396,7 @@ class Watch:
         with self.cond:
             self._out.close()
             n = self._load_file(shift)
-            self._out = (RAW / f"{self.vid}.live.jsonl").open("a")
+            self._out = (chat_file(self.vid, "live.jsonl")).open("a")
             self.info.started, self.info.synced = start, True
             if self._resume_t > -1e17:
                 self._resume_t -= shift
@@ -547,12 +548,13 @@ class Watch:
                        started=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(i.started)),
                        live_for=hms(time.time() - i.started))
                 st.done(f"live for {hms(time.time() - i.started)} · {i.viewers:,} watching · chat on")
+            register(self.vid, i.title, i.channel, i.started, "live")
             self._changed()
-            save = run.step("save").begin(f"writing data/raw/{self.vid}.live.jsonl")
-            RAW.mkdir(parents=True, exist_ok=True)
+            save = run.step("save").begin(f"writing {rel(chat_file(self.vid, 'live.jsonl'))}")
+            chat_file(self.vid, "live.jsonl").parent.mkdir(parents=True, exist_ok=True)
             with self.cond:
                 self._resume()
-            self._out = (RAW / f"{self.vid}.live.jsonl").open("a")
+            self._out = (chat_file(self.vid, "live.jsonl")).open("a")
             replay.LIVE_RUNNING.add(self.vid)
             self._write_meta(True)
             run.step("detect").begin("waiting for chat…")
@@ -599,10 +601,11 @@ class Watch:
         if self.info and self.total:
             self._write_meta(False)
             spikes = group_spikes(self.det.windows, self.rules)
-            save_outputs(ROOT / "output" / self.vid, self.vid, self.info.title, self.det.windows, spikes, self.rules)
+            save_outputs(results_dir(self.vid), self.vid, self.info.title, self.det.windows, spikes, self.rules)
             if save:
-                save.set(messages=self.total, file=f"data/raw/{self.vid}.live.jsonl")
-                save.done(f"{self.total:,} messages in data/raw/{self.vid}.live.jsonl · output/{self.vid}/")
+                f = rel(chat_file(self.vid, "live.jsonl"))
+                save.set(messages=self.total, file=f)
+                save.done(f"{self.total:,} messages in {f} · results/ next to it")
         result = f"{why} · {self.total:,} messages · {len(self.moments)} moments"
         self.run.finish("error" if error else "done", result)
         if not error:

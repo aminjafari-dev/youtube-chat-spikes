@@ -4,11 +4,11 @@ yt-dlp writes one JSON object per line. Each line holds the chat actions at one 
 with `videoOffsetTimeMsec` = exact position in the recording. We read the file while
 yt-dlp is still writing it, so results can be shown before the download finishes.
 
-Saved per video in data/raw/:
-    <id>.jsonl      [seconds, author, text] per message (small, reused next time)
-    <id>.meta.json  title, channel, duration
+Saved in the stream's folder (library.py), streams/<Channel>/<date> <Title> [<id>]/chat/:
+    replay.jsonl      [seconds, author, text] per message (small, reused next time)
+    replay.meta.json  title, channel, duration
 
-A stream recorded in live mode (live.py) is saved as <id>.live.jsonl + <id>.live.meta.json,
+A stream recorded in live mode (live.py) is saved as live.jsonl + live.meta.json there,
 same format. When there is no full replay copy, the live recording is used instead.
 """
 
@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Callable, Iterator
 
 ROOT = Path(__file__).resolve().parents[2]
-RAW = ROOT / "data" / "raw"
+RAW = ROOT / "data" / "raw"   # temp folders of running yt-dlp jobs only
 LIVE_RUNNING: set[str] = set()  # video ids live.py is recording right now
 
 
@@ -40,6 +40,12 @@ class StreamInfo:
     duration: float
     live: bool = False   # True = chat recorded in live mode (may start late, if the watch started late)
     first: float = 0.0   # live recording: stream time of the first message
+    started: float = 0.0  # unix time the stream started (for the folder name)
+
+
+def _file(video_id: str, name: str) -> Path:
+    from .library import chat_file
+    return chat_file(video_id, name)
 
 
 def _ytdlp(*args: str) -> list[str]:
@@ -57,24 +63,24 @@ def _last_error(stderr: str) -> str:
 
 def chat_path(video_id: str) -> Path:
     """The saved chat of a stream: the full replay copy, or else the live recording."""
-    full = RAW / f"{video_id}.jsonl"
-    live = RAW / f"{video_id}.live.jsonl"
+    full = _file(video_id, "replay.jsonl")
+    live = _file(video_id, "live.jsonl")
     return full if full.exists() or not live.exists() else live
 
 
 def live_meta(video_id: str) -> dict | None:
-    p = RAW / f"{video_id}.live.meta.json"
+    p = _file(video_id, "live.meta.json")
     return json.loads(p.read_text()) if p.exists() else None
 
 
 def cached(video_id: str, include_running: bool = False) -> StreamInfo | None:
     """Saved stream info. A live recording counts once it is no longer being recorded (or always with include_running)."""
-    meta = RAW / f"{video_id}.meta.json"
-    if meta.exists() and (RAW / f"{video_id}.jsonl").exists():
+    meta = _file(video_id, "replay.meta.json")
+    if meta.exists() and _file(video_id, "replay.jsonl").exists():
         m = json.loads(meta.read_text())
         return StreamInfo(video_id, m["title"], m.get("channel", ""), m.get("duration", 0))
     m = live_meta(video_id)
-    if m and (RAW / f"{video_id}.live.jsonl").exists() and (video_id not in LIVE_RUNNING or include_running):
+    if m and _file(video_id, "live.jsonl").exists() and (video_id not in LIVE_RUNNING or include_running):
         return StreamInfo(video_id, m["title"], m.get("channel", ""), m.get("duration", 0), live=True,
                           first=m.get("first", 0))
     return None
@@ -95,7 +101,12 @@ def get_info(video_id: str) -> StreamInfo:
         if status != "was_live":
             raise ReplayError("This is a normal video, not a past live stream, so it has no chat.")
         raise ReplayError("This past stream has no chat replay (the streamer may have turned it off).")
-    return StreamInfo(video_id, d.get("title") or video_id, d.get("channel") or "", float(d.get("duration") or 0))
+    started = d.get("release_timestamp") or d.get("timestamp")
+    if not started and d.get("upload_date"):
+        import time
+        started = time.mktime(time.strptime(d["upload_date"], "%Y%m%d"))
+    return StreamInfo(video_id, d.get("title") or video_id, d.get("channel") or "", float(d.get("duration") or 0),
+                      started=float(started or 0))
 
 
 # ---- Parsing YouTube chat items ----
@@ -161,7 +172,8 @@ def download(info: StreamInfo, stop: threading.Event,
             _ytdlp("--skip-download", "--write-subs", "--sub-langs", "live_chat",
                    "-o", str(tmp / "%(id)s.%(ext)s"), f"https://www.youtube.com/watch?v={vid}"),
             stdout=subprocess.DEVNULL, stderr=err, text=True)
-    out_path = RAW / f"{vid}.jsonl"
+    out_path = _file(vid, "replay.jsonl")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     part = out_path.with_suffix(".jsonl.part")
     count, done = 0, False
     src = None
@@ -203,7 +215,7 @@ def download(info: StreamInfo, stop: threading.Event,
         if count == 0:
             raise ReplayError("The chat replay was empty.")
         part.rename(out_path)
-        (RAW / f"{vid}.meta.json").write_text(json.dumps(
+        _file(vid, "replay.meta.json").write_text(json.dumps(
             {"title": info.title, "channel": info.channel, "duration": info.duration, "messages": count}))
         done = True
     finally:
@@ -228,6 +240,8 @@ def load(video_id: str, stop: threading.Event | None = None,
         yield from read_cached(video_id)
         return
     info = get_info(video_id)
+    from .library import register
+    register(video_id, info.title, info.channel, info.started or None, "finished")
     if on_info:
         on_info(info, False)
     yield from download(info, stop, on_progress)

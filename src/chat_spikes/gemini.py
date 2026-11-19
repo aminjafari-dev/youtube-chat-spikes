@@ -34,7 +34,12 @@ TIMEOUT = 60         # seconds to wait for one answer; then try the next model
 BEFORE = AFTER = 60  # transcript sent: 1 minute before and after the spike
 MAX_CHAT = 2000      # chat messages sent at most (a busy spike has a few hundred)
 PAD_START, PAD_END = 0.3, 0.7  # small safety margin around the cut (caption timing is ~0.5 s exact)
-ANSWERS = ROOT / "data" / "processed" / "why"
+
+
+def _answers(video_id: str) -> Path:
+    """Saved AI answers: the stream's folder, ai/ (library.py)."""
+    from .library import ai_dir
+    return ai_dir(video_id)
 
 _lock = threading.Lock()
 _last_call = 0.0
@@ -110,7 +115,7 @@ def model_chain() -> list[str]:
 
 
 def answer_path(video_id: str, peak: float, chat_only: bool = False) -> Path:
-    return ANSWERS / video_id / f"{int(peak)}{'.chat' if chat_only else ''}.json"
+    return _answers(video_id) / f"{int(peak)}{'.chat' if chat_only else ''}.json"
 
 
 def saved_answer(video_id: str, peak: float) -> dict | None:
@@ -257,7 +262,7 @@ AI_CHAT_STEPS = [
     ("prompt", "Build the question", "Live mode: puts together every chat message of the spike and chat per 10 s over 2 minutes. No captions: YouTube makes them only after the stream is processed."),
     ("queue", "Wait for turn", "Free tier: one Gemini request at a time, at least 13 s apart, so the per-minute limit is never hit."),
     ("gemini", "Ask Gemini", "Sends the question to the best free model. If a model is busy (503), slow (no answer in 60 s) or out of free quota, the next model is tried."),
-    ("save", "Save answer", "Saves the answer in data/processed/why/<video>/<time>.chat.json."),
+    ("save", "Save answer", "Saves the answer in the stream's folder, ai/<time>.chat.json."),
 ]
 
 AI_STEPS = [
@@ -267,7 +272,7 @@ AI_STEPS = [
     ("queue", "Wait for turn", "Free tier: one Gemini request at a time, at least 13 s apart, so the per-minute limit is never hit."),
     ("gemini", "Ask Gemini", "Sends the question to the best free model. If a model is busy (503), slow (no answer in 60 s) or out of free quota, the next model is tried."),
     ("cut", "Exact cut", "Finds the start and end words Gemini chose in YouTube's captions and takes their exact times (+0.3 s before, +0.7 s after)."),
-    ("save", "Save answer", "Saves the answer in data/processed/why/, so this moment never uses quota again."),
+    ("save", "Save answer", "Saves the answer in the stream's folder (ai/), so this moment never uses quota again."),
 ]
 
 
@@ -321,7 +326,7 @@ def _save(video_id: str, peak: float, result: dict, run, chat_only: bool = False
         p = answer_path(video_id, peak, chat_only)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(result, ensure_ascii=False, indent=1))
-        st.done(str(p.relative_to(ROOT)))
+        st.done(str(p.relative_to(ROOT)) if ROOT in p.parents else str(p))
     return result
 
 
@@ -384,7 +389,7 @@ class ReelHook(BaseModel):
 
 
 def hook_path(video_id: str, peak: float) -> Path:
-    return ANSWERS / video_id / f"{int(peak)}.hook.json"
+    return _answers(video_id) / f"{int(peak)}.hook.json"
 
 
 def _hook_prompt(info: dict, moment: dict, lines: list[dict], chat: list[tuple], known: dict | None) -> str:

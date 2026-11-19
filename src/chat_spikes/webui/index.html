@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Chat Spikes</title>
+  <title>New tab · Chat Spikes</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body class="start">
@@ -37,18 +37,77 @@
       <div class="card-head"><h2>Being watched now</h2></div>
       <ul id="watchList" class="watch-list"></ul>
     </div>
+    <div class="card library" id="library" hidden>
+      <div class="card-head">
+        <h2>Saved streams</h2>
+        <span class="muted small" id="libRoot"></span>
+      </div>
+      <input type="search" id="libFilter" class="lib-filter" placeholder="Filter by channel or title…" autocomplete="off">
+      <div id="libList"></div>
+    </div>
   </main>
 
   <script type="module">
     import { esc } from "./common.js";
+    const embedded = window.top !== window;
+    // In a tab of the app window, a stream that is already open in another tab is shown there instead.
+    const open = (href) => {
+      if (embedded) window.parent.postMessage({ tab: "open", url: new URL(href, location.href).pathname.slice(1) + new URL(href, location.href).search }, location.origin);
+      else location.href = href;
+    };
+    document.addEventListener("click", (e) => {
+      const a = e.target.closest("a[data-stream]");
+      if (!a || e.metaKey || e.ctrlKey || e.shiftKey) return;
+      e.preventDefault();
+      open(a.getAttribute("href"));
+    });
+
     // Live watches keep running on the app; list them so you can jump back in.
     const list = await (await fetch("/api/live/list")).json();
     const running = list.filter((w) => w.running);
     if (running.length) {
       document.getElementById("watching").hidden = false;
       document.getElementById("watchList").innerHTML = running.map((w) => `
-        <li><a href="live.html?v=${w.video_id}"><i class="live-dot"></i><b>${esc(w.channel || w.video_id)}</b>
+        <li><a data-stream href="live.html?v=${w.video_id}"><i class="live-dot"></i><b>${esc(w.channel || w.video_id)}</b>
           <span class="muted">${esc(w.title)}</span><span class="muted small">${w.messages.toLocaleString()} messages · ${esc(w.state)}</span></a></li>`).join("");
+    }
+
+    // Everything saved, one folder per stream, grouped by channel (library.py).
+    const lib = await (await fetch("/api/library/list")).json();
+    const live = new Set(running.map((w) => w.video_id));
+    const day = (t) => t ? new Date(t * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" }) : "";
+    function drawLibrary() {
+      const q = document.getElementById("libFilter").value.trim().toLowerCase();
+      const items = lib.streams.filter((s) => !q || `${s.channel} ${s.title}`.toLowerCase().includes(q));
+      const groups = new Map();
+      for (const s of items) {
+        const k = s.channel || "Unknown channel";
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(s);
+      }
+      document.getElementById("libList").innerHTML = [...groups].map(([ch, rows]) => `
+        <details class="lib-channel" open>
+          <summary><b>${esc(ch)}</b><span class="muted small">${rows.length} stream${rows.length === 1 ? "" : "s"}</span></summary>
+          <ul class="lib-rows">${rows.sort((a, b) => (b.started || b.added) - (a.started || a.added)).map((s) => `
+            <li>
+              <a data-stream class="lib-main" href="${live.has(s.id) ? "live" : "finished"}.html?v=${s.id}" title="${esc(s.folder)}">
+                ${live.has(s.id) ? '<i class="live-dot"></i>' : ""}<span class="lib-title">${esc(s.title)}</span>
+                <span class="muted small">${[day(s.started), s.replay ? "full chat" : s.live ? "recorded live" : "", s.clips ? `${s.clips} reel${s.clips === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ")}</span>
+              </a>
+              <button type="button" class="ghostbtn small" data-reveal="${s.id}" title="Open this stream's folder">Show folder</button>
+            </li>`).join("")}
+          </ul>
+        </details>`).join("") || '<p class="muted small">Nothing matches.</p>';
+    }
+    if (lib.streams.length) {
+      document.getElementById("library").hidden = false;
+      document.getElementById("libRoot").textContent = `${lib.streams.length} in ${lib.root}/`;
+      drawLibrary();
+      document.getElementById("libFilter").addEventListener("input", drawLibrary);
+      document.getElementById("libList").addEventListener("click", (e) => {
+        const b = e.target.closest("[data-reveal]");
+        if (b) fetch(`/api/library/reveal?v=${b.dataset.reveal}`);
+      });
     }
   </script>
   <script src="activity.js"></script>

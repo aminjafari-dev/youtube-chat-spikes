@@ -19,10 +19,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import activity, live
+from . import activity, library, live
 from .cli import load_ignore_users, video_id_from_or_none
 from .detector import Detector, Rules, Window, group_spikes, keep_message
-from .replay import RAW, ROOT, ReplayError, StreamInfo, chat_path, load
+from .replay import ReplayError, StreamInfo, chat_path, load
 from .report import hms, ranked, save_outputs, window_row
 
 WEB = Path(__file__).parent / "webui"
@@ -84,9 +84,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.live_api(u.path.rsplit("/", 1)[-1], qs)
         if u.path.startswith("/api/clip/"):
             return self.clip_api(u.path.rsplit("/", 1)[-1], qs)
+        if u.path.startswith("/api/library/"):
+            return self.library_api(u.path.rsplit("/", 1)[-1], qs)
         if u.path.startswith("/clips/"):
             return self.send_clip(u.path)
-        name = "index.html" if u.path in ("/", "") else u.path.lstrip("/")
+        name = "app.html" if u.path in ("/", "") else u.path.lstrip("/")  # the tabbed window
         f = (WEB / name).resolve()
         if WEB.resolve() not in f.parents or not f.is_file():
             self.send_error(404)
@@ -110,7 +112,8 @@ class Handler(BaseHTTPRequestHandler):
         vid = (qs.get("v") or [""])[0]
         t0, t1 = float((qs.get("from") or [0])[0]), float((qs.get("to") or [0])[0])
         rows = []
-        for path in (RAW / f"{vid}.jsonl", RAW / f"{vid}.jsonl.part", RAW / f"{vid}.live.jsonl"):
+        replay = library.chat_file(vid, "replay.jsonl")
+        for path in (replay, replay.with_suffix(".jsonl.part"), library.chat_file(vid, "live.jsonl")):
             if video_id_from_or_none(vid) == vid and path.exists():
                 ignore = load_ignore_users()
                 rules = Rules(ignore_users=ignore)
@@ -154,7 +157,7 @@ class Handler(BaseHTTPRequestHandler):
             run = activity.start("evidence", f"Chat evidence · {name}moment {hms(moment['peak'])}", target, [
                 ("evidence", "Chat evidence", "Counts the chat of this moment on your Mac: reaction mix, words that "
                  "stand out, most repeated message. Free, no AI."),
-                ("saved", "Saved AI answer?", "Looks in data/processed/why/ for an AI answer from before. "
+                ("saved", "Saved AI answer?", "Looks in the stream's ai/ folder for an AI answer from before. "
                  "Nothing is sent to Gemini here.")])
         with run.step("evidence") as st:
             ev = evidence(vid, moment["clip_start"], moment["clip_end"])
@@ -279,7 +282,17 @@ class Handler(BaseHTTPRequestHandler):
         self.run.step("detect").detail(f"{len(det.windows):,} windows checked · {len(moments)} moments so far")
 
     def save(self, vid: str, info: StreamInfo | None, windows, spikes, rules) -> None:
-        save_outputs(ROOT / "output" / vid, vid, info.title if info else vid, windows, spikes, rules)
+        save_outputs(library.results_dir(vid), vid, info.title if info else vid, windows, spikes, rules)
+
+    # ---- The stream library (library.py): one folder per stream, grouped by channel ----
+    def library_api(self, action: str, qs: dict) -> None:
+        vid = (qs.get("v") or [""])[0].strip()
+        if action == "list":
+            return self.send_json({"root": library.rel(library.LIBRARY), "streams": library.streams()})
+        if action == "reveal":
+            ok = video_id_from_or_none(vid) == vid and library.reveal(vid)
+            return self.send_json({"ok": bool(ok)})
+        self.send_error(404)
 
     # ---- Live mode ----
     def live_api(self, action: str, qs: dict) -> None:
@@ -341,14 +354,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_error(404)
         except (ValueError, clips.ClipError) as e:
             return self.send_json({"error": str(e) or "bad value"})
-        self.send_json({"clips": clips.jobs(vid), "channel": channel, "layout": clips.layout_for(channel, vid),
+        self.send_json({"clips": clips.jobs(vid), "channel": channel,
+                        "folder": library.rel(library.clips_dir(vid)), "layout": clips.layout_for(channel, vid),
                         "auto": bool(w and w.auto_clip) if w else None})
 
     def send_clip(self, path: str) -> None:
-        """data/clips/<video>/<peak>.mp4|.jpg, with Range support so the video can be scrubbed."""
-        from .clips import CLIPS
-        f = (CLIPS / path[len("/clips/"):]).resolve()
-        if CLIPS.resolve() not in f.parents or f.suffix not in (".mp4", ".jpg") or not f.is_file():
+        """/clips/<video>/<peak>.mp4|.jpg = the stream's clips/ folder, with Range support so the video can be scrubbed."""
+        vid, _, name = path[len("/clips/"):].partition("/")
+        if video_id_from_or_none(vid) != vid:
+            return self.send_error(404)
+        base = library.clips_dir(vid).resolve()
+        f = (base / name).resolve()
+        if base not in f.parents or f.suffix not in (".mp4", ".jpg") or not f.is_file():
             return self.send_error(404)
         size = f.stat().st_size
         ctype = "video/mp4" if f.suffix == ".mp4" else "image/jpeg"
@@ -423,6 +440,9 @@ class Handler(BaseHTTPRequestHandler):
 def main() -> None:
     port = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else PORT
     activity.load_history()
+    moved = library.migrate()
+    if moved:
+        print(f"Moved {moved} saved stream(s) into {library.rel(library.LIBRARY)}/ (one folder per stream, by channel).")
     # Closed by a signal (not Ctrl+C): still run the clean-up that ends yt-dlp of live watches (live.py, atexit).
     for sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda *_: sys.exit(0))

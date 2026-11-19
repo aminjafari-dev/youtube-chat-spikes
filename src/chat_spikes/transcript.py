@@ -1,6 +1,6 @@
 """What the streamer says: YouTube's captions of the stream, with a time for every word.
 
-Downloaded once with yt-dlp (text only, no video) and saved in data/raw/<id>.words.json
+Downloaded once with yt-dlp (text only, no video) and saved in the stream's folder, chat/words.json
 as [[seconds, word], ...]. YouTube makes automatic captions for most finished streams;
 if the streamer uploaded their own captions, those are used instead.
 """
@@ -23,7 +23,13 @@ _lock = threading.Lock()
 
 
 def _words_path(video_id: str):
-    return RAW / f"{video_id}.words.json"
+    from .library import chat_file
+    return chat_file(video_id, "words.json")
+
+
+def _rel(p) -> str:
+    from .library import rel
+    return rel(p)
 
 
 def _pick_language(d: dict) -> tuple[str, bool] | None:
@@ -71,7 +77,7 @@ def words(video_id: str, step=None) -> list[list]:
     with _lock:
         if path.exists():
             result = json.loads(path.read_text())
-            step.set(source="saved copy", words=len(result), file=f"data/raw/{path.name}")
+            step.set(source="saved copy", words=len(result), file=_rel(path))
             step.log(f"read saved captions: {len(result):,} words")
             return result
         step.detail("asking YouTube which captions this stream has…")
@@ -104,8 +110,9 @@ def words(video_id: str, step=None) -> list[list]:
             shutil.rmtree(tmp, ignore_errors=True)
         if not result:
             raise TranscriptError("The captions of this stream are empty.")
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
-        step.set(source="downloaded", words=len(result), file=f"data/raw/{path.name}")
+        step.set(source="downloaded", words=len(result), file=_rel(path))
         step.log(f"downloaded {len(result):,} words")
         return result
 

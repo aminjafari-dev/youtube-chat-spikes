@@ -77,6 +77,7 @@ function handle({ type, data }) {
       duration = data.duration;
       $("tLen").textContent = clock(data.duration);
       $("tChannel").textContent = data.channel || " ";
+      document.title = `${data.channel || data.title} · Chat Spikes`;
       if (data.recorded_live) $("tMsgsSub").textContent = `recorded live from ${clock(data.first)}`;
       setStatus(data.recorded_live
         ? `${data.title} (chat recorded in live mode from ${clock(data.first)}, loading instantly)`

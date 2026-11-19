@@ -6,3 +6,5 @@ tools/*
 .env
 __pycache__/
 .venv/
+
+streams/

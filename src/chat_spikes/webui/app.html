@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chat Spikes</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="app">
+  <header class="tabbar">
+    <span class="dot app-dot" id="appDot" title="Chat Spikes"></span>
+    <div class="tabs" id="tabs" role="tablist" aria-label="Streams"></div>
+    <button type="button" class="newtab" id="newTab" title="New tab (open another stream)" aria-label="New tab">+</button>
+    <span class="tabbar-gap"></span>
+    <button type="button" id="actToggle" class="act-toggle" aria-expanded="false" aria-controls="activity">
+      <span class="act-dot"></span>Activity<span class="act-count" id="actCount" hidden></span>
+    </button>
+  </header>
+
+  <section id="activity" class="activity app-activity" hidden aria-label="Activity"></section>
+
+  <main class="frames" id="frames"></main>
+
+  <div class="closeask" id="closeAsk" hidden role="dialog" aria-label="Close tab">
+    <p><b id="closeName"></b> is still being watched live.</p>
+    <div class="closeask-btns">
+      <button type="button" class="ghostbtn" data-close="keep" title="The app keeps recording; reopen it from a new tab">Close tab, keep watching</button>
+      <button type="button" class="ghostbtn danger" data-close="stop">Stop watching and close</button>
+      <button type="button" class="ghostbtn" data-close="cancel">Cancel</button>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+  <script src="activity.js"></script>
+</body>
+</html>
