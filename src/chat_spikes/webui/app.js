@@ -7,6 +7,9 @@ let es = null, vid = null, duration = 0, rules = { window: 10 };
 let windows = [];   // [start, score, messages, people, normal, spike]
 let moments = [];   // from the server, biggest first
 let sortBy = "score", selected = null;
+let why = {};            // peak -> {evidence, ai, ai_error, has_key, loading}
+let autoQueue = [];      // moments Gemini explains automatically after the analysis
+const AUTO_TOP = 3;      // free tier: keep it small
 
 const clock = (sec) => {
   const s = Math.max(0, Math.floor(sec));
@@ -34,7 +37,8 @@ function setProgress(pct, text) {
 }
 
 function reset() {
-  windows = []; moments = []; selected = null; duration = 0;
+  windows = []; moments = []; selected = null; duration = 0; why = {}; autoQueue = [];
+  $("whyCard").hidden = true;
   ["tLen", "tMsgs", "tBase", "tTop"].forEach((id) => ($(id).textContent = "–"));
   $("tChannel").innerHTML = $("tTopSub").innerHTML = "&nbsp;";
   $("moments").innerHTML = '<li class="muted">Nothing yet.</li>';
@@ -119,6 +123,8 @@ function handle({ type, data }) {
       updateBaseline();
       renderMoments();
       if (moments.length) selectMoment(0, false);
+      autoQueue = moments.slice(0, AUTO_TOP);
+      runAutoQueue();
       break;
     case "error": setStatus(data, true); setProgress(null); finish(); break;
   }
@@ -146,7 +152,7 @@ function renderMoments() {
   if (!list.length) { $("moments").innerHTML = '<li class="muted">No spikes yet.</li>'; return; }
   $("moments").innerHTML = list.map((s, i) => `
     <li class="moment${selected === s.peak ? " sel" : ""}" data-i="${i}">
-      <div class="row"><span class="rank">#${i + 1}</span><span class="time">${clock(s.peak)}</span>
+      <div class="row"><span class="rank">#${i + 1}</span><span class="time">${clock(s.peak)}</span>${badge(s)}
         <span class="ratio">${Math.round(s.score)} msgs · ${s.ratio}× · ${s.people} people</span></div>
       <div class="clip">Clip ${clock(s.clip_start)} → ${clock(s.clip_end)} (${Math.round(s.clip_end - s.clip_start)} s)
         · <a href="${ytAt(s.clip_start)}" target="_blank" rel="noopener">YouTube ↗</a></div>
@@ -167,12 +173,91 @@ document.querySelectorAll(".seg button").forEach((b) => b.addEventListener("clic
   renderMoments();
 }));
 
+// ---- Why? Free chat evidence + Gemini ----
+function badge(s) {
+  const w = why[s.peak];
+  if (w && w.loading) return '<span class="vbadge wait" title="Gemini is watching this clip">…</span>';
+  if (w && w.ai) return `<span class="vbadge s${Math.min(3, Math.floor(w.ai.viral_score / 4))}" title="Viral score from Gemini">${w.ai.viral_score}/10</span>`;
+  return "";
+}
+
+const whyQuery = (s, ai) => `/api/why?v=${vid}&peak=${s.peak}&clip_start=${s.clip_start}&clip_end=${s.clip_end}&score=${s.score}&ratio=${s.ratio}&ai=${ai ? 1 : 0}`;
+
+async function loadWhy(s, ai) {
+  const cur = why[s.peak] || {};
+  why[s.peak] = { ...cur, loading: ai, ai_error: null };
+  renderMoments(); if (selected === s.peak) renderWhy(s);
+  try {
+    const r = await (await fetch(whyQuery(s, ai))).json();
+    why[s.peak] = { ...r, loading: false };
+  } catch {
+    why[s.peak] = { ...cur, loading: false, ai_error: "Couldn't reach the app." };
+  }
+  renderMoments(); if (selected === s.peak) renderWhy(s);
+}
+
+async function runAutoQueue() {
+  while (autoQueue.length) {
+    const s = autoQueue.shift();
+    if (!why[s.peak] || !why[s.peak].evidence) await loadWhy(s, false);
+    const w = why[s.peak];
+    if (!w.has_key) { autoQueue = []; break; }      // no Gemini key: evidence only
+    if (!w.ai) await loadWhy(s, true);
+    if (why[s.peak].ai_error) { autoQueue = []; break; } // e.g. free limit reached: stop asking
+  }
+}
+
+const TYPE_ICON = { funny: "😂", shock: "😱", skill_win: "🔥", fail: "💔", rage: "😡", payoff: "🎉",
+  wholesome: "🥹", drama: "🍿", announcement: "📣", technical_issue: "🛠", other: "❔" };
+
+function renderWhy(s) {
+  const card = $("whyCard"), w = why[s.peak];
+  card.hidden = false;
+  $("whyTitle").textContent = `Why did chat explode at ${clock(s.peak)}?`;
+  $("whyModel").textContent = w && w.ai ? `Gemini · ${w.ai.model}` : "";
+  if (!w || !w.evidence) {
+    $("whyEvidence").innerHTML = '<p class="muted">Reading the chat…</p>'; $("whyAi").innerHTML = ""; return;
+  }
+  const e = w.evidence;
+  $("whyEvidence").innerHTML = `
+    <div class="ev-row"><span class="ev-label">Reaction</span>${e.types.map((t) => `<span class="chip">${esc(t.label)} ${t.share}%</span>`).join("") || '<span class="muted small">unclear</span>'}</div>
+    <div class="ev-row"><span class="ev-label">Chat kept saying</span>${e.keywords.map((k) => `<span class="chip kw" title="${k.count} people · ${k.times_more}× more than usual">${esc(k.text)}</span>`).join("") || '<span class="muted small">nothing stands out</span>'}</div>
+    ${e.top_message ? `<div class="ev-row"><span class="ev-label">Most repeated</span><span class="quote">“${esc(e.top_message.text)}” ×${e.top_message.count}</span></div>` : ""}`;
+
+  const box = $("whyAi");
+  if (w.ai) {
+    const a = w.ai;
+    box.innerHTML = `
+      <div class="ai-head"><span class="vscore s${Math.min(3, Math.floor(a.viral_score / 4))}">${a.viral_score}<small>/10</small></span>
+        <div><div class="ai-title">${esc(a.title)}</div>
+        <div class="muted small">${TYPE_ICON[a.moment_type] || ""} ${esc(a.moment_type.replace("_", " "))} · confidence ${esc(a.confidence)} · hook: “${esc(a.hook)}”</div></div></div>
+      <dl class="ai-body">
+        <dt>What happened</dt><dd>${esc(a.what_happened)}</dd>
+        <dt>Why chat reacted</dt><dd>${esc(a.why_chat_reacted)}</dd>
+        <dt>Why it could go viral</dt><dd>${esc(a.why_viral)}</dd>
+        <dt>Best clip</dt><dd><button class="linkbtn" id="playBest">▶ ${clock(a.best_start)} → ${clock(a.best_end)}</button>
+          (${Math.round(a.best_end - a.best_start)} s) · <a href="${ytAt(a.best_start)}" target="_blank" rel="noopener">YouTube ↗</a></dd>
+      </dl>`;
+    $("playBest").onclick = () => seek(a.best_start);
+  } else if (w.loading) {
+    box.innerHTML = '<p class="ai-wait"><span class="spin"></span>Gemini is watching the clip… (about 1 minute)</p>';
+  } else if (!w.has_key) {
+    box.innerHTML = '<p class="muted small">Add <code>GEMINI_API_KEY=…</code> to the project\'s <code>.env</code> file to get Gemini\'s explanation (free key: aistudio.google.com → Get API key).</p>';
+  } else {
+    box.innerHTML = `${w.ai_error ? `<p class="err small">${esc(w.ai_error)}</p>` : ""}
+      <button class="askbtn" id="askGemini">Ask Gemini why this could go viral</button>`;
+    $("askGemini").onclick = () => loadWhy(s, true);
+  }
+}
+
 async function selectMoment(i, play) {
   const s = sortedMoments()[i];
   if (!s) return;
   selected = s.peak;
   renderMoments();
   if (play) seek(s.clip_start);
+  renderWhy(s);
+  if (!why[s.peak] || !why[s.peak].evidence) loadWhy(s, false);
   $("chatTitle").textContent = `Chat at ${clock(s.clip_start)} → ${clock(s.clip_end)}`;
   $("chat").innerHTML = '<li class="muted">Loading…</li>';
   try {

@@ -50,6 +50,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.analyze(qs)
         if u.path == "/api/chat":
             return self.chat_between(qs)
+        if u.path == "/api/why":
+            return self.why(qs)
         name = "index.html" if u.path in ("/", "") else u.path.lstrip("/")
         f = (WEB / name).resolve()
         if WEB.resolve() not in f.parents or not f.is_file():
@@ -87,6 +89,30 @@ class Handler(BaseHTTPRequestHandler):
                             rows.append({"t": t, "author": a, "text": x, "counted": keep_message(a, x, rules)})
                 break
         self.send_bytes(json.dumps(rows[:2000], ensure_ascii=False).encode(), "application/json")
+
+    def why(self, qs: dict) -> None:
+        """Why did chat explode? Free chat evidence, plus Gemini's answer when ai=1 (or saved earlier)."""
+        from .evidence import evidence
+        from .gemini import GeminiError, api_key, explain, saved_answer
+        from .replay import cached
+
+        g = lambda k, d="0": (qs.get(k) or [d])[0]
+        vid = g("v", "")
+        if video_id_from_or_none(vid) != vid or not (RAW / f"{vid}.jsonl").exists():
+            return self.send_bytes(b'{"error": "Analyze the stream first."}', "application/json")
+        moment = {"peak": float(g("peak")), "clip_start": float(g("clip_start")), "clip_end": float(g("clip_end")),
+                  "score": float(g("score")), "ratio": float(g("ratio"))}
+        ev = evidence(vid, moment["clip_start"], moment["clip_end"])
+        out = {"evidence": {k: v for k, v in ev.items() if k != "sample"}, "has_key": bool(api_key()),
+               "ai": saved_answer(vid, moment["peak"])}
+        if g("ai") == "1" and not out["ai"]:
+            info = cached(vid)
+            try:
+                out["ai"] = explain(vid, {"title": info.title if info else "", "channel": info.channel if info else ""},
+                                    moment, ev)
+            except GeminiError as e:
+                out["ai_error"] = str(e).split("|", 1)[-1]
+        self.send_bytes(json.dumps(out, ensure_ascii=False).encode(), "application/json")
 
     def analyze(self, qs: dict) -> None:
         url = (qs.get("url") or [""])[0].strip()

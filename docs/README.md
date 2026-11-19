@@ -42,6 +42,52 @@ Options: `--window 10 --threshold 2.5 --min-score 8 --lead 20 --tail 15 --refres
 Results are saved in `output/<video-id>/` (`chart.html`, `spikes.csv`, `windows.csv`).
 The chat is saved in `data/raw/<video-id>.jsonl`, so opening the same stream again is instant.
 
+## Why did chat explode? (Gemini)
+
+Click a moment and the **"Why did chat explode?"** card shows:
+
+1. **Free chat evidence** (no AI, counted on your Mac, `evidence.py`):
+   - reaction mix (😂 Funny / 😱 Shock / 🔥 Win / 💔 Fail / 🎉 Hype, from word lists)
+   - words that stand out: said by at least 3 different people and 3× more than in the rest of the stream
+   - the message repeated most word for word
+2. **Gemini's answer** (`gemini.py`): Gemini watches the clip (picture + sound) and reads the evidence, then returns
+   what happened, why chat reacted, why it could go viral, a **viral score 1–10**, type, title, hook line,
+   and the **best start/end** for the clip (▶ plays it).
+
+The top 3 moments are sent to Gemini automatically after the analysis. Any other moment has an
+"Ask Gemini" button. Answers are saved in `data/processed/why/`, so nothing is asked twice.
+
+### Setup
+
+Free key: https://aistudio.google.com → **Get API key**. Add it to `.env` in the project folder:
+
+```
+GEMINI_API_KEY=your-key
+# optional: force one model instead of the automatic choice
+# GEMINI_MODEL=gemini-3.8-flash
+```
+
+### Which model (free tier)
+
+Chosen from Google's pricing and models pages (Nov 2026): free tier + accepts video.
+The app tries them in this order and moves to the next one if a model's free quota is used up:
+
+1. `gemini-4-hydrogen` (newest generation, free, video)
+2. `gemini-3.8-flash`
+3. `gemini-3.6-flash`
+4. `gemini-3.5-flash-lite`
+
+### How it stays within the free tier
+
+- Only the clip is downloaded (`data/processed/clips/`, ~3 MB at 360p for 45 s) and sent to Gemini.
+  Not the YouTube link: a developer report (Aug 2026) says Gemini may then process the audio of the
+  whole stream, which would use up the free quota.
+- Low video resolution (about 3× fewer tokens).
+- One request at a time, at least 13 s apart. On "too many requests" it waits and retries.
+  If a model's daily limit is reached, it moves to the next model.
+- Only 3 moments automatically.
+- Free-tier requests may be used by Google to improve its products (public stream content here).
+
 ## How long the download takes
 
 YouTube hands out chat replay a few seconds at a time, so yt-dlp reads it piece by piece.
@@ -85,6 +131,8 @@ The page shows a clear message for each case.
 |------|-----|
 | `src/chat_spikes/replay.py` | Downloads chat replay with yt-dlp, reads it while it downloads, saves a compact copy |
 | `src/chat_spikes/detector.py` | Windows, rules, spike detection |
+| `src/chat_spikes/evidence.py` | Free chat evidence per moment: standout words, reaction type, top message |
+| `src/chat_spikes/gemini.py` | Clip download + Gemini "why" answer, model fallback, free-tier pacing, saved answers |
 | `src/chat_spikes/report.py` | CSV files and the standalone chart |
 | `src/chat_spikes/web.py` | Local web server for the page (`chat-spikes-web`) |
 | `src/chat_spikes/webui/` | The page: `index.html`, `style.css`, `app.js` |

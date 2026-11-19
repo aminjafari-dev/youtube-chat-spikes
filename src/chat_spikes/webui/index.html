@@ -13,7 +13,7 @@
       <h1>Chat Spikes</h1>
     </div>
     <form id="form" class="controls">
-      <input id="url" type="url" placeholder="Paste a finished YouTube stream link…" autocomplete="off">
+      <input id="url" type="text" placeholder="Paste a finished YouTube stream link…" autocomplete="off">
       <button id="btn" type="submit">Analyze</button>
     </form>
   </header>
@@ -30,6 +30,15 @@
     <section class="left">
       <div class="player" id="player">
         <div class="placeholder">The stream recording will show here</div>
+      </div>
+
+      <div class="card why" id="whyCard" hidden>
+        <div class="card-head">
+          <h2 id="whyTitle">Why did chat explode?</h2>
+          <span class="muted small" id="whyModel"></span>
+        </div>
+        <div id="whyEvidence" class="evidence"></div>
+        <div id="whyAi" class="ai"></div>
       </div>
 
       <div class="tiles">
