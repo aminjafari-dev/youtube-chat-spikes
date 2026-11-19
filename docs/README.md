@@ -1,11 +1,14 @@
-# YouTube Chat Spikes (finished streams)
+# YouTube Chat Spikes (finished and live streams)
 
 - **Started:** 2026-11-17
-- **Branch:** `finished-streams`. The live-stream version (official API) stays on `main`.
-- **Status:** Working. Paste a finished stream, get its biggest chat spikes as moments to clip.
+- **Branches:** `finished-streams` (finished streams only), `live-mode` (adds live mode, 2026-11-19).
+  The old live version on `main` uses the official YouTube Data API and is not used any more.
+- **Status:** Working. Two modes on the start page:
+  - **Finished stream (video):** paste a stream that has ended, get its biggest chat spikes as moments to clip.
+  - **Live stream:** watch a stream while it is live; spikes show up in real time.
 - **Part of:** [twitch-chat-clipper](../../twitch-chat-clipper/docs/README.md) (Option A: rules only, no AI, $0)
 
-## What it does
+## What it does (finished stream)
 
 1. You paste the link of a YouTube stream that has **ended**.
 2. **yt-dlp** downloads the stream's chat replay: every message with its exact position in the recording.
@@ -22,7 +25,8 @@ cd /Volumes/Development/claude/projects/youtube-chat-spikes
 uv run chat-spikes-web
 ```
 
-Opens http://localhost:8765. Paste a link, press **Analyze**.
+Opens http://localhost:8765, the start page: choose **Live stream** or **Finished stream (video)**.
+On the finished page, paste a link and press **Analyze** (or open `finished.html?v=VIDEO_ID`).
 
 - **Progress bar** while the chat downloads. The chart and moments fill in as it goes.
 - **Chart of the whole stream**: orange = spike, numbered dots = top 5. Click anywhere to jump the video there.
@@ -41,6 +45,96 @@ Options: `--window 10 --threshold 2.5 --min-score 8 --lead 20 --tail 15 --refres
 
 Results are saved in `output/<video-id>/` (`chart.html`, `spikes.csv`, `windows.csv`).
 The chat is saved in `data/raw/<video-id>.jsonl`, so opening the same stream again is instant.
+
+## Live mode
+
+Press **Live stream** on the start page, paste the link of a stream that is live right now, press **Watch live**.
+
+### How it works
+
+- **yt-dlp only.** No API key, no browser extension, and the app's own code never calls YouTube's chat
+  endpoints. yt-dlp runs in its live chat mode
+  (`--skip-download --write-subs --sub-langs live_chat`) and asks YouTube for new chat about every 10 s,
+  like a chat window in a browser. The app reads the file yt-dlp writes, as it grows (`live.py`).
+- **Stream time, not your clock.** Every message has YouTube's own time (`timestampUsec`).
+  Stream time = that time − the stream's 0:00.
+  - First the 0:00 comes from yt-dlp (`release_timestamp`).
+  - That can be a bit early: on IShowSpeed (2026-11-19) it was **149 s** before the video's real 0:00.
+    So the live page's player (muted autoplay) tells the app the real 0:00
+    (YouTube's player reports the real clock time of the frame it shows). The app then shifts the times
+    saved so far, once, and uses the new 0:00. After that, moment times match the video, the player,
+    YouTube `?t=` links and finished-stream mode. Activity → Live watch → Check stream shows the shift.
+  - If no live page is open, the app keeps `release_timestamp` (the page says so in the status line).
+- **Same detector** as finished streams (`detector.py`, 10-second windows, same rules), fed message by message.
+  A window closes when newer chat arrives (or 45 s after it ends, if chat is silent).
+  After a hole in the recording (app was closed, reconnect) the detector learns the normal level again,
+  so the hole doesn't look like a spike.
+- **Runs on the app, not in the page.** Closing or reloading the page doesn't stop it; the page reconnects
+  (`live.html?v=VIDEO_ID`, or the start page's "Being watched now" list).
+- **Saved while it runs:** `data/raw/<id>.live.jsonl` (same format as the replay copy) and
+  `<id>.live.meta.json`. Press **Watch live** again later and it continues the same file.
+  When it stops: `output/<id>/` gets `windows.csv`, `spikes.csv`, `chart.html`.
+- **Finished-stream mode reads the live recording instantly** when there is no full replay copy
+  (status says "chat recorded in live mode from …"). It only has the chat from when you started watching.
+- **Stops** when you press **Stop**, or by itself when the stream ends. Then the page links to the finished-stream page.
+  Stop and closing the app (Ctrl+C or a kill signal) end yt-dlp and delete its temp folder (`data/raw/_live_<id>/`).
+
+### The live page
+
+- Live player. Click a moment, a chat time or the chart: the player **rewinds** there (YouTube's DVR,
+  about the last 12 hours). **Back to live** returns to the live edge.
+- Tiles: live for, messages, messages per minute, normal level, biggest spike.
+- Live chart (last 10 min / 30 min / 2 h / all). The grey band on the right = "chat on its way":
+  chat reaches the app about 10–15 s late, plus the 10-second window.
+- **Moments to clip** update in real time. A new one is highlighted (**NEW**, glowing border), the tab title
+  shows "(1 new)", and you can turn on a 🔔 sound and a notification (when the tab is hidden).
+- Chat panel: **Live chat** (newest at the bottom) or **Selected moment**.
+- **Why did chat explode?** Free chat evidence works the same as for finished streams.
+
+### AI check in live mode: chat only
+
+YouTube makes captions only after the stream is processed, so in live mode **"Check with AI (chat only)"**
+sends Gemini only the chat of the spike and chat per 10 s (no transcript, no exact cut). Saved as
+`data/processed/why/<id>/<time>.chat.json`. After the stream ends, open it in Finished stream mode:
+the same moment shows the chat-only answer plus a **Full check with captions and exact cut** button.
+
+### Activity: "Live watch" job
+
+Check stream (live? chat on? real start) → Connect to chat (yt-dlp) → Reading chat (messages/min, last
+message time) → Find spikes (new moments are logged) → Save.
+
+- No new message for 60 s on a busy chat (≥ 10/min), or yt-dlp stops: the step turns red with the reason
+  (yt-dlp's last error, e.g. a block from YouTube), the app asks yt-dlp if the stream is still live, and
+  reconnects (waits 10, 20, 40, 60 s). After 5 tries in a row without new chat it gives up.
+- Quiet chat: every 5 minutes of silence the app asks if the stream is still live.
+
+### Limits (tested 2026-11-19)
+
+- **yt-dlp reads "Top chat", not "Live chat" (all messages).** YouTube filters Top chat (removes spam,
+  repeats). On IShowSpeed: yt-dlp ~250–320/min, the browser's Top chat ~300/min, Live chat ~500/min.
+  Spikes still show (they are measured against the normal level), but counts are lower than
+  in a finished stream's replay. yt-dlp has no option for "Live chat". The other way would be a browser
+  that the app controls (Playwright), reading the "Live chat" view. Not built: needs a big new dependency.
+- Moments show up about 20–30 s after they happen (YouTube → yt-dlp ~10–15 s, plus the 10-second window).
+- Rewinding only works inside YouTube's DVR window (~12 h) and if the streamer allows DVR.
+- yt-dlp's first chunk of chat can take 1–2 minutes on very busy streams (it waits up to 3 minutes).
+- Chat only from when you start watching. Members-only or subscribers-only chat: you see what YouTube shows
+  a logged-out viewer.
+- The temp file yt-dlp writes grows by ~1.5 KB per message (deleted on stop); on a 10-hour mega stream
+  that can be ~150 MB in `data/raw/_live_<id>/` while it runs.
+
+### When YouTube changes something
+
+Live mode depends only on yt-dlp. If live chat stops arriving (Activity → Live watch → Reading chat or
+Connect to chat turns red), update yt-dlp first:
+
+```bash
+uv lock --upgrade-package yt-dlp && uv sync
+```
+
+If the stream time looks wrong, open the live page once while the stream is live (the player sets the
+exact 0:00). Live lines are read in `live.py` → `parse_live_line()`: if YouTube changes the message format,
+that is the one place to fix.
 
 ## Why did chat explode? (free evidence + optional AI check)
 
@@ -113,7 +207,7 @@ The number on the button = jobs running right now.
 - **Jobs** (left): every job, newest first, with its step dots, how long it took and the result.
   Jobs: *Analyze stream* (check video → get chat → find spikes → save),
   *Chat evidence* (each moment you click), *AI check* (evidence → captions → build question →
-  wait for turn → ask Gemini → exact cut → save).
+  wait for turn → ask Gemini → exact cut → save), *Live watch* (see Live mode).
 - Click a job to see its flow, click a step to see what it does, its timing, its numbers and its log
   (for Gemini: every model tried, every error, every retry).
 - **Requests**: every request the page made to the app, with status and time.
@@ -154,7 +248,7 @@ Second time: instant (saved copy).
 
 ## When it can't work
 
-- The stream is still live → wait until it ends (or use the `main` branch).
+- The stream is still live → use **Live stream** mode (finished mode opens it after it ends).
 - Chat replay turned off by the streamer, private or members-only stream → no chat to read.
 - A normal video (not a past live stream) has no chat.
 
@@ -165,14 +259,15 @@ The page shows a clear message for each case.
 | File | Job |
 |------|-----|
 | `src/chat_spikes/replay.py` | Downloads chat replay with yt-dlp, reads it while it downloads, saves a compact copy |
+| `src/chat_spikes/live.py` | Live mode: yt-dlp live chat reader, stream time, real-time detection, reconnects, saving |
 | `src/chat_spikes/detector.py` | Windows, rules, spike detection |
 | `src/chat_spikes/evidence.py` | Free chat evidence per moment: standout words, reaction type, top message |
 | `src/chat_spikes/transcript.py` | Captions of the stream with a time per word (yt-dlp), cut into numbered lines |
 | `src/chat_spikes/gemini.py` | Text-only Gemini check: what happened + exact cut from the captions, model fallback, saved answers |
 | `src/chat_spikes/report.py` | CSV files and the standalone chart |
 | `src/chat_spikes/activity.py` | Records every job, its steps and every request; live feed for the Activity panel |
-| `src/chat_spikes/web.py` | Local web server for the page (`chat-spikes-web`) |
-| `src/chat_spikes/webui/` | The page: `index.html`, `style.css`, `app.js`, `activity.js` |
+| `src/chat_spikes/web.py` | Local web server for the pages (`chat-spikes-web`), incl. `/api/live/*` |
+| `src/chat_spikes/webui/` | `index.html` (start page), `finished.html` + `finished.js`, `live.html` + `live.js`, shared `common.js` (player, chart, moments, why card, chat), `activity.js`, `style.css` |
 | `src/chat_spikes/cli.py` | Command line (`chat-spikes`) |
 
 ## Maintenance

@@ -6,113 +6,51 @@
   <title>Chat Spikes</title>
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="start">
   <header class="top">
     <div class="brand">
-      <span class="dot" id="busyDot"></span>
+      <span class="dot"></span>
       <h1>Chat Spikes</h1>
     </div>
     <button type="button" id="actToggle" class="act-toggle" aria-expanded="false" aria-controls="activity">
       <span class="act-dot"></span>Activity<span class="act-count" id="actCount" hidden></span>
     </button>
-    <form id="form" class="controls">
-      <input id="url" type="text" placeholder="Paste a finished YouTube stream link…" autocomplete="off">
-      <button id="btn" type="submit">Analyze</button>
-    </form>
   </header>
 
-  <section id="activity" class="activity" hidden aria-label="Activity">
-    <div class="act-side">
-      <div class="act-sidehead">
-        <div class="seg act-tabs" role="group" aria-label="Show">
-          <button type="button" data-tab="runs" class="on">Jobs</button>
-          <button type="button" data-tab="requests">Requests</button>
-        </div>
-        <span class="muted small" id="actLive"></span>
-      </div>
-      <ol id="actList" class="act-list"></ol>
-      <div class="act-opts small muted">
-        <label><input type="checkbox" id="actFollow" checked> Follow what's running</label>
-        <label><input type="checkbox" id="actFiles"> Show page files in requests</label>
-      </div>
+  <section id="activity" class="activity" hidden aria-label="Activity"></section>
+
+  <main class="choose">
+    <p class="lead">Find the moments where YouTube chat exploded. Which kind of stream?</p>
+    <div class="choices">
+      <a class="choice live-choice" href="live.html">
+        <span class="ico"><i class="live-dot"></i></span>
+        <span class="ctitle">Live stream</span>
+        <span class="cdesc">Watch a stream while it is live. Spikes show up in real time (about 20–30 s after they happen).</span>
+      </a>
+      <a class="choice" href="finished.html">
+        <span class="ico">▶</span>
+        <span class="ctitle">Finished stream (video)</span>
+        <span class="cdesc">A stream that has ended. Reads the whole chat replay and ranks the biggest moments.</span>
+      </a>
     </div>
-    <div class="act-main">
-      <div class="act-head" id="actHead"></div>
-      <div class="flow" id="actFlow"></div>
-      <div class="act-detail" id="actDetail"></div>
+    <div class="card watching" id="watching" hidden>
+      <div class="card-head"><h2>Being watched now</h2></div>
+      <ul id="watchList" class="watch-list"></ul>
     </div>
-  </section>
-
-  <div class="statusbar">
-    <p id="status" class="status">Paste the link of a stream that has ended, then press Analyze.</p>
-    <div class="progress" id="progressWrap" hidden>
-      <div class="track"><div class="fill" id="progressFill"></div></div>
-      <span class="small muted" id="progressText"></span>
-    </div>
-  </div>
-
-  <main class="grid">
-    <section class="left">
-      <div class="player" id="player">
-        <div class="placeholder">The stream recording will show here</div>
-      </div>
-
-      <div class="card why" id="whyCard" hidden>
-        <div class="card-head">
-          <h2 id="whyTitle">Why did chat explode?</h2>
-          <span class="muted small" id="whyModel"></span>
-        </div>
-        <div id="whyEvidence" class="evidence"></div>
-        <div id="whyAi" class="ai"></div>
-      </div>
-
-      <div class="tiles">
-        <div class="tile"><span class="label">Stream length</span><span class="value" id="tLen">–</span><span class="sub" id="tChannel">&nbsp;</span></div>
-        <div class="tile"><span class="label">Chat messages</span><span class="value" id="tMsgs">–</span><span class="sub">in the replay</span></div>
-        <div class="tile"><span class="label">Normal level</span><span class="value" id="tBase">–</span><span class="sub">per 10 s (typical)</span></div>
-        <div class="tile hot-tile"><span class="label">Biggest spike</span><span class="value" id="tTop">–</span><span class="sub" id="tTopSub">&nbsp;</span></div>
-      </div>
-
-      <div class="card">
-        <div class="card-head">
-          <h2>Chat activity across the whole stream</h2>
-          <div class="key">
-            <span><i class="sw normal"></i>normal</span>
-            <span><i class="sw spike"></i>spike</span>
-            <span><i class="sw mark">1</i>top moments</span>
-          </div>
-        </div>
-        <div class="chart" id="chart">
-          <svg id="svg"></svg>
-          <div class="tip" id="tip" hidden></div>
-          <div class="empty" id="chartEmpty">The chart fills in as the chat replay is read.</div>
-        </div>
-        <p class="hint small muted">Click anywhere on the chart to jump the video to that time.</p>
-      </div>
-    </section>
-
-    <aside class="right">
-      <div class="card moments">
-        <div class="card-head">
-          <h2>Moments to clip <span class="muted small" id="momentCount"></span></h2>
-          <div class="seg" role="group" aria-label="Sort moments">
-            <button type="button" data-sort="score" class="on">Most messages</button>
-            <button type="button" data-sort="ratio">Most × normal</button>
-          </div>
-        </div>
-        <ol id="moments" class="moment-list"><li class="muted">Nothing yet.</li></ol>
-      </div>
-      <div class="card chatcard">
-        <div class="card-head">
-          <h2 id="chatTitle">Chat in the selected moment</h2>
-          <span class="muted small" id="chatCount"></span>
-        </div>
-        <ul id="chat" class="chat"><li class="muted">Pick a moment to read what chat said.</li></ul>
-      </div>
-    </aside>
   </main>
 
-  <script src="app.js"></script>
+  <script type="module">
+    import { esc } from "./common.js";
+    // Live watches keep running on the app; list them so you can jump back in.
+    const list = await (await fetch("/api/live/list")).json();
+    const running = list.filter((w) => w.running);
+    if (running.length) {
+      document.getElementById("watching").hidden = false;
+      document.getElementById("watchList").innerHTML = running.map((w) => `
+        <li><a href="live.html?v=${w.video_id}"><i class="live-dot"></i><b>${esc(w.channel || w.video_id)}</b>
+          <span class="muted">${esc(w.title)}</span><span class="muted small">${w.messages.toLocaleString()} messages · ${esc(w.state)}</span></a></li>`).join("");
+    }
+  </script>
   <script src="activity.js"></script>
 </body>
 </html>

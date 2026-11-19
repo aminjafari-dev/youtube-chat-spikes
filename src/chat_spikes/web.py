@@ -1,4 +1,8 @@
-"""Local web page: paste a finished YouTube stream, press Analyze, see its biggest chat spikes.
+"""Local web page: find the biggest chat spikes of a YouTube stream.
+
+Two modes (start page at /):
+  - Finished stream (/finished.html): paste a stream that has ended, the chat replay is downloaded.
+  - Live stream (/live.html): watch a stream while it is live (live.py), spikes appear in real time.
 
     uv run chat-spikes-web          # then open http://localhost:8765
 """
@@ -6,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import signal
 import sys
 import threading
 import time
@@ -14,30 +19,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import activity
+from . import activity, live
 from .cli import load_ignore_users, video_id_from_or_none
-from .detector import Detector, Rules, Spike, Window, group_spikes, keep_message
-from .replay import RAW, ROOT, ReplayError, StreamInfo, load
-from .report import hms, write_chart, write_spikes, write_windows
+from .detector import Detector, Rules, Window, group_spikes, keep_message
+from .replay import RAW, ROOT, ReplayError, StreamInfo, chat_path, load
+from .report import hms, ranked, save_outputs, window_row
 
 WEB = Path(__file__).parent / "webui"
 PORT = 8765
-TOP_MOMENTS = 200
-
-
-def window_row(w: Window) -> list:
-    # Compact: [start, score, messages, people, normal_level, spike]
-    return [int(w.start), round(w.score, 1), w.raw, w.users, round(w.baseline, 1), int(w.is_spike)]
-
-
-def spike_json(s: Spike) -> dict:
-    return {"peak": s.peak.start, "clip_start": s.clip_start, "clip_end": s.clip_end,
-            "score": round(s.peak.score, 1), "ratio": round(s.peak.ratio, 1),
-            "people": s.peak.users, "samples": s.peak.samples}
-
-
-def ranked(spikes: list[Spike]) -> list[dict]:
-    return [spike_json(s) for s in sorted(spikes, key=lambda s: -s.peak.score)[:TOP_MOMENTS]]
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -91,6 +80,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.chat_between(qs)
         if u.path == "/api/why":
             return self.why(qs)
+        if u.path.startswith("/api/live/"):
+            return self.live_api(u.path.rsplit("/", 1)[-1], qs)
         name = "index.html" if u.path in ("/", "") else u.path.lstrip("/")
         f = (WEB / name).resolve()
         if WEB.resolve() not in f.parents or not f.is_file():
@@ -115,7 +106,7 @@ class Handler(BaseHTTPRequestHandler):
         vid = (qs.get("v") or [""])[0]
         t0, t1 = float((qs.get("from") or [0])[0]), float((qs.get("to") or [0])[0])
         rows = []
-        for path in (RAW / f"{vid}.jsonl", RAW / f"{vid}.jsonl.part"):
+        for path in (RAW / f"{vid}.jsonl", RAW / f"{vid}.jsonl.part", RAW / f"{vid}.live.jsonl"):
             if video_id_from_or_none(vid) == vid and path.exists():
                 ignore = load_ignore_users()
                 rules = Rules(ignore_users=ignore)
@@ -130,25 +121,31 @@ class Handler(BaseHTTPRequestHandler):
         self.send_bytes(json.dumps(rows[:2000], ensure_ascii=False).encode(), "application/json")
 
     def why(self, qs: dict) -> None:
-        """Why did chat explode? Free chat evidence, plus Gemini's answer when ai=1 (or saved earlier)."""
+        """Why did chat explode? Free chat evidence, plus Gemini's answer when ai=1 (or saved earlier).
+
+        mode=chat (live mode): Gemini gets chat only, because captions don't exist yet.
+        """
         from .evidence import evidence
-        from .gemini import AI_STEPS, GeminiError, api_key, explain, saved_answer
+        from .gemini import AI_CHAT_STEPS, AI_STEPS, GeminiError, api_key, explain, explain_chat, saved_answer
         from .replay import cached
 
         g = lambda k, d="0": (qs.get(k) or [d])[0]
         vid = g("v", "")
-        if video_id_from_or_none(vid) != vid or not (RAW / f"{vid}.jsonl").exists():
+        chat_only = g("mode", "full") == "chat"
+        if video_id_from_or_none(vid) != vid or not chat_path(vid).exists():
             return self.send_bytes(b'{"error": "Analyze the stream first."}', "application/json")
         moment = {"peak": float(g("peak")), "clip_start": float(g("clip_start")), "clip_end": float(g("clip_end")),
                   "score": float(g("score")), "ratio": float(g("ratio"))}
-        info = cached(vid)
+        info = cached(vid, include_running=True)
         name = f"{info.channel or info.title} · " if info else ""
         target = {"video": vid, "title": info.title if info else "", "peak": moment["peak"],
                   "clip": [moment["clip_start"], moment["clip_end"]]}
-        saved = saved_answer(vid, moment["peak"])
-        ask_ai = g("ai") == "1" and not saved
+        saved = saved_answer(vid, moment["peak"])  # a full answer first, else a chat-only one
+        # Finished mode may ask again for the full check (with captions) after a chat-only answer from live mode.
+        ask_ai = g("ai") == "1" and (not saved or (saved.get("chat_only") and not chat_only))
         if ask_ai:
-            run = activity.start("ai", f"AI check · {name}moment {hms(moment['peak'])}", target, AI_STEPS)
+            run = activity.start("ai", f"AI check{' (chat only)' if chat_only else ''} · {name}moment "
+                                 f"{hms(moment['peak'])}", target, AI_CHAT_STEPS if chat_only else AI_STEPS)
         else:
             run = activity.start("evidence", f"Chat evidence · {name}moment {hms(moment['peak'])}", target, [
                 ("evidence", "Chat evidence", "Counts the chat of this moment on your Mac: reaction mix, words that "
@@ -168,10 +165,11 @@ class Handler(BaseHTTPRequestHandler):
             run.finish("done", "evidence ready")
         else:
             try:
-                out["ai"] = explain(vid, {"title": info.title if info else "", "channel": info.channel if info else ""},
-                                    moment, ev, run)
+                meta = {"title": info.title if info else "", "channel": info.channel if info else ""}
+                out["ai"] = (explain_chat if chat_only else explain)(vid, meta, moment, ev, run)
                 a = out["ai"]
-                run.finish("done", f"cut {hms(a['best_start'])} → {hms(a['best_end'])} · {a['viral_score']}/10")
+                run.finish("done", f"{a['viral_score']}/10 · chat only" if chat_only else
+                           f"cut {hms(a['best_start'])} → {hms(a['best_end'])} · {a['viral_score']}/10")
             except GeminiError as e:
                 out["ai_error"] = str(e).split("|", 1)[-1]
                 for st in run.steps.values():
@@ -218,7 +216,8 @@ class Handler(BaseHTTPRequestHandler):
             run.step("chat").begin("reading the saved copy…" if from_cache else "downloading with yt-dlp…")
             run.step("detect").begin("waiting for chat…")
             self.send_event("info", {"video_id": info.video_id, "title": info.title, "channel": info.channel,
-                                     "duration": info.duration, "cached": from_cache})
+                                     "duration": info.duration, "cached": from_cache,
+                                     "recorded_live": info.live, "first": info.first})
 
         def on_progress(reached: float, count: int) -> None:
             state["reached"], state["count"] = reached, count
@@ -276,16 +275,81 @@ class Handler(BaseHTTPRequestHandler):
         self.run.step("detect").detail(f"{len(det.windows):,} windows checked · {len(moments)} moments so far")
 
     def save(self, vid: str, info: StreamInfo | None, windows, spikes, rules) -> None:
-        out = ROOT / "output" / vid
-        out.mkdir(parents=True, exist_ok=True)
-        write_windows(out / "windows.csv", windows)
-        write_spikes(out / "spikes.csv", spikes, vid)
-        write_chart(out / "chart.html", windows, spikes, rules, info.title if info else vid, vid)
+        save_outputs(ROOT / "output" / vid, vid, info.title if info else vid, windows, spikes, rules)
+
+    # ---- Live mode ----
+    def live_api(self, action: str, qs: dict) -> None:
+        g = lambda k: (qs.get(k) or [""])[0].strip()
+        if action == "feed":
+            return self.live_feed(g("v"))
+        if action == "list":
+            return self.send_json(live.watches())
+        if action == "start":
+            vid = video_id_from_or_none(g("url"))
+            if not vid:
+                return self.send_json({"error": "That doesn't look like a YouTube link."})
+            return self.send_json(live.start(vid).summary())
+        if action == "sync":
+            w = live.get(g("v"))
+            try:
+                start = float(g("start"))
+            except ValueError:
+                return self.send_json({"ok": False, "why": "bad start"})
+            return self.send_json(w.sync(start) if w else {"ok": False, "why": "not watching"})
+        if action == "stop":
+            w = live.get(g("v"))
+            if w:
+                w.stop()
+            return self.send_json({"ok": bool(w)})
+        self.send_error(404)
+
+    def send_json(self, data) -> None:
+        self.send_bytes(json.dumps(data, ensure_ascii=False).encode(), "application/json")
+
+    def live_feed(self, vid: str) -> None:
+        """Live page: everything so far, then what changed, about once a second, until the watch ends.
+
+        The watch runs on its own; closing or reloading the page doesn't stop it.
+        """
+        w = live.get(vid)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        if not w:
+            self.send_event("gone", "This stream isn't being watched. Press Watch live to start.")
+            return
+        try:
+            snap = w.snapshot()
+            self.send_event("snapshot", snap)
+            n_rows, chat_seq, mv, version = len(snap["windows"]), snap["chat_seq"], snap["moments_version"], -1
+            while True:
+                running = w.running
+                version = w.wait(version, 1.0)
+                if w.epoch != snap["epoch"]:  # all times changed (synced to the player): send everything again
+                    snap = w.snapshot()
+                    self.send_event("snapshot", snap)
+                    n_rows, chat_seq, mv = len(snap["windows"]), snap["chat_seq"], snap["moments_version"]
+                    continue
+                d = w.delta(n_rows, chat_seq, mv)
+                n_rows += len(d["windows"])
+                chat_seq = d["chat_seq"]
+                mv = d.get("moments_version", mv)
+                self.send_event("update", d)
+                if not running:
+                    self.send_event("ended", d["stats"])
+                    return
+                time.sleep(0.5)  # at most ~2 updates a second
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
 
 def main() -> None:
     port = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else PORT
     activity.load_history()
+    # Closed by a signal (not Ctrl+C): still run the clean-up that ends yt-dlp of live watches (live.py, atexit).
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda *_: sys.exit(0))
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.daemon_threads = True
     url = f"http://localhost:{port}"
@@ -297,7 +361,7 @@ def main() -> None:
             pass
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         print("\nBye.")
 
 

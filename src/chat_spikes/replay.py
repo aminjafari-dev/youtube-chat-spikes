@@ -7,6 +7,9 @@ yt-dlp is still writing it, so results can be shown before the download finishes
 Saved per video in data/raw/:
     <id>.jsonl      [seconds, author, text] per message (small, reused next time)
     <id>.meta.json  title, channel, duration
+
+A stream recorded in live mode (live.py) is saved as <id>.live.jsonl + <id>.live.meta.json,
+same format. When there is no full replay copy, the live recording is used instead.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from typing import Callable, Iterator
 
 ROOT = Path(__file__).resolve().parents[2]
 RAW = ROOT / "data" / "raw"
+LIVE_RUNNING: set[str] = set()  # video ids live.py is recording right now
 
 
 class ReplayError(Exception):
@@ -34,6 +38,8 @@ class StreamInfo:
     title: str
     channel: str
     duration: float
+    live: bool = False   # True = chat recorded in live mode (may start late, if the watch started late)
+    first: float = 0.0   # live recording: stream time of the first message
 
 
 def _ytdlp(*args: str) -> list[str]:
@@ -49,11 +55,28 @@ def _last_error(stderr: str) -> str:
     return msg.replace("ERROR: ", "").split("] ", 1)[-1]
 
 
-def cached(video_id: str) -> StreamInfo | None:
+def chat_path(video_id: str) -> Path:
+    """The saved chat of a stream: the full replay copy, or else the live recording."""
+    full = RAW / f"{video_id}.jsonl"
+    live = RAW / f"{video_id}.live.jsonl"
+    return full if full.exists() or not live.exists() else live
+
+
+def live_meta(video_id: str) -> dict | None:
+    p = RAW / f"{video_id}.live.meta.json"
+    return json.loads(p.read_text()) if p.exists() else None
+
+
+def cached(video_id: str, include_running: bool = False) -> StreamInfo | None:
+    """Saved stream info. A live recording counts once it is no longer being recorded (or always with include_running)."""
     meta = RAW / f"{video_id}.meta.json"
     if meta.exists() and (RAW / f"{video_id}.jsonl").exists():
         m = json.loads(meta.read_text())
         return StreamInfo(video_id, m["title"], m.get("channel", ""), m.get("duration", 0))
+    m = live_meta(video_id)
+    if m and (RAW / f"{video_id}.live.jsonl").exists() and (video_id not in LIVE_RUNNING or include_running):
+        return StreamInfo(video_id, m["title"], m.get("channel", ""), m.get("duration", 0), live=True,
+                          first=m.get("first", 0))
     return None
 
 
@@ -114,7 +137,7 @@ def parse_line(line: str) -> list[tuple[float, str, str]]:
 # ---- Loading ----
 
 def read_cached(video_id: str) -> Iterator[tuple[float, str, str]]:
-    with (RAW / f"{video_id}.jsonl").open() as f:
+    with chat_path(video_id).open() as f:
         for line in f:
             t, a, x = json.loads(line)
             yield t, a, x

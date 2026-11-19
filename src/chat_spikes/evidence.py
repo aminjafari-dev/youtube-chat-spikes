@@ -11,7 +11,7 @@ import re
 from collections import Counter
 from functools import lru_cache
 
-from .replay import RAW
+from .replay import chat_path
 
 # Reaction types and the chat words that signal them.
 TYPES = {
@@ -54,12 +54,17 @@ def tokens(text: str) -> list[str]:
     return list(out)
 
 
-@lru_cache(maxsize=8)
 def stream_counts(video_id: str) -> tuple[Counter, int]:
-    """How often each token appears across the whole stream (cached)."""
+    """How often each token appears across the whole stream (cached until the file grows, e.g. live)."""
+    p = chat_path(video_id)
+    return _counts(str(p), p.stat().st_size)
+
+
+@lru_cache(maxsize=8)
+def _counts(path: str, size: int) -> tuple[Counter, int]:
     c: Counter = Counter()
     n = 0
-    with (RAW / f"{video_id}.jsonl").open() as f:
+    with open(path) as f:
         for line in f:
             _, _, text = json.loads(line)
             c.update(tokens(text))
@@ -69,7 +74,7 @@ def stream_counts(video_id: str) -> tuple[Counter, int]:
 
 def messages_between(video_id: str, t0: float, t1: float) -> list[tuple[float, str, str]]:
     out = []
-    with (RAW / f"{video_id}.jsonl").open() as f:
+    with chat_path(video_id).open() as f:
         for line in f:
             t, a, x = json.loads(line)
             if t > t1:

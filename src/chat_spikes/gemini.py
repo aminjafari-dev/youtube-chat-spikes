@@ -75,6 +75,18 @@ class Cut(BaseModel):
     confidence: str = Field(description="low, medium or high: how sure you are about what happened.")
 
 
+class ChatGuess(BaseModel):
+    """Live mode: no captions yet, so Gemini only reads chat and can't pick exact cut words."""
+    what_happened: str = Field(description="Your best guess of what happened, from chat only, 1-3 sentences.")
+    why_chat_reacted: str = Field(description="Why viewers reacted so strongly at this moment, 1-2 sentences.")
+    why_viral: str = Field(description="Why this could (or could not) work as a short clip for strangers, 1-2 sentences.")
+    moment_type: MomentType
+    viral_score: int = Field(ge=1, le=10, description="1 = only fans care, 10 = anyone would share it.")
+    title: str = Field(description="A short, catchy clip title (max ~60 characters). No clickbait lies.")
+    hook: str = Field(description="One line of on-screen text for the first second of the clip.")
+    confidence: str = Field(description="low, medium or high: how sure you are, given you only see chat.")
+
+
 def api_key() -> str | None:
     if os.environ.get("GEMINI_API_KEY"):
         return os.environ["GEMINI_API_KEY"]
@@ -97,13 +109,16 @@ def model_chain() -> list[str]:
     return [m for m in chain if m not in _dead_models]
 
 
-def answer_path(video_id: str, peak: float) -> Path:
-    return ANSWERS / video_id / f"{int(peak)}.json"
+def answer_path(video_id: str, peak: float, chat_only: bool = False) -> Path:
+    return ANSWERS / video_id / f"{int(peak)}{'.chat' if chat_only else ''}.json"
 
 
 def saved_answer(video_id: str, peak: float) -> dict | None:
-    p = answer_path(video_id, peak)
-    return json.loads(p.read_text()) if p.exists() else None
+    """The full answer (captions + exact cut) if there is one, else a chat-only answer from live mode."""
+    for p in (answer_path(video_id, peak), answer_path(video_id, peak, True)):
+        if p.exists():
+            return json.loads(p.read_text())
+    return None
 
 
 def log(msg: str) -> None:
@@ -150,6 +165,33 @@ If the transcript doesn't explain the reaction (it may be something only visible
 lower the confidence and viral score. Write in plain English."""
 
 
+def _chat_prompt(info: dict, moment: dict, ev: dict, chat: list[tuple], counts: list[tuple]) -> str:
+    kw = ", ".join(f'"{k["text"]}" ({k["count"]} people)' for k in ev["keywords"]) or "none"
+    types = ", ".join(f'{t["label"]} {t["share"]}%' for t in ev["types"]) or "unclear"
+    timeline = "\n".join(f"{_mmss(t)}  {n} messages" for t, n in counts)
+    chat_txt = "\n".join(f"[{_mmss(t)}] {a}: {x}" for t, a, x in chat)
+    return f"""You are a video editor watching a livestream that is LIVE right now, looking for short viral clips.
+
+Stream: "{info.get('title', '')}" by {info.get('channel', 'unknown')}.
+Live chat exploded at {_mmss(moment['peak'])}: {moment['score']:.0f} messages in 10 seconds,
+{moment['ratio']}x the stream's normal level. Chat usually reacts 5-20 seconds AFTER the thing that caused it.
+Times are stream time (h:mm:ss.s).
+You only have the chat: there is no transcript and no video yet.
+
+CHAT MESSAGES PER 10 SECONDS:
+{timeline}
+
+Chat summary: words that stand out: {kw}. Reaction mix: {types}.
+
+EVERY CHAT MESSAGE DURING THE SPIKE (may include spam, other languages, unrelated talk):
+{chat_txt}
+
+Tasks:
+1. Guess what happened and why chat reacted so strongly. Only use what chat shows; don't invent details.
+2. Judge whether it could work as a short clip for people who don't know this streamer.
+If chat doesn't make it clear, say so and use low confidence. Write in plain English."""
+
+
 def _norm(w: str) -> str:
     return re.sub(r"[^\w']", "", w.lower())
 
@@ -185,7 +227,7 @@ def cut_times(lines: list[dict], cut: Cut) -> tuple[float, float, bool]:
     return round(start - PAD_START, 1), round(end + PAD_END, 1), i is not None and j is not None
 
 
-def _call(model: str, prompt: str) -> Cut:
+def _call(model: str, prompt: str, schema=Cut):
     from google import genai
     from google.genai import errors, types
 
@@ -197,7 +239,7 @@ def _call(model: str, prompt: str) -> Cut:
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                response_schema=Cut,
+                response_schema=schema,
                 temperature=0.3,
             ),
         )
@@ -209,6 +251,14 @@ def _call(model: str, prompt: str) -> Cut:
         raise GeminiError(f"0|Gemini returned no usable answer: {(resp.text or '')[:200]}")
     return resp.parsed
 
+
+AI_CHAT_STEPS = [
+    ("evidence", "Chat evidence", "Counts the chat of this moment on your Mac: reaction mix, words that stand out, most repeated message. Free, no AI."),
+    ("prompt", "Build the question", "Live mode: puts together every chat message of the spike and chat per 10 s over 2 minutes. No captions: YouTube makes them only after the stream is processed."),
+    ("queue", "Wait for turn", "Free tier: one Gemini request at a time, at least 13 s apart, so the per-minute limit is never hit."),
+    ("gemini", "Ask Gemini", "Sends the question to the best free model. If a model is busy (503), slow (no answer in 60 s) or out of free quota, the next model is tried."),
+    ("save", "Save answer", "Saves the answer in data/processed/why/<video>/<time>.chat.json."),
+]
 
 AI_STEPS = [
     ("evidence", "Chat evidence", "Counts the chat of this moment on your Mac: reaction mix, words that stand out, most repeated message. Free, no AI."),
@@ -223,18 +273,14 @@ AI_STEPS = [
 
 def explain(video_id: str, info: dict, moment: dict, ev: dict, run=None) -> dict:
     """Ask Gemini about one moment. Returns the saved answer dict. `run` shows each step on the Activity panel."""
-    global _last_call
     from . import activity
-    from .cli import load_ignore_users
-    from .detector import Rules, keep_message
-    from .evidence import messages_between
     from .transcript import TranscriptError, lines_between, words
 
     run = run or activity.NULL
-    saved = saved_answer(video_id, moment["peak"])
-    if saved:
+    full = answer_path(video_id, moment["peak"])
+    if full.exists():  # a chat-only answer from live mode doesn't count: this one also uses captions
         run.step("save").skip("answer was saved before")
-        return saved
+        return json.loads(full.read_text())
     if not api_key():
         raise GeminiError("No Gemini key. Put GEMINI_API_KEY=... in the project's .env file "
                           "(free key: aistudio.google.com → Get API key).")
@@ -251,13 +297,70 @@ def explain(video_id: str, info: dict, moment: dict, ev: dict, run=None) -> dict
                               + (f" (the captions end at {_mmss(last)})." if last < t0 else "."))
         st.done(f"{len(lines)} lines between {_mmss(t0)} and {_mmss(t1)}")
     with run.step("prompt") as st:
-        rules = Rules(ignore_users=load_ignore_users())
-        msgs = [m for m in messages_between(video_id, t0, t1) if keep_message(m[1], m[2], rules)]  # no bots/!commands
-        chat = [m for m in msgs if moment["clip_start"] <= m[0] <= moment["clip_end"]][:MAX_CHAT]
-        counts = [(t, sum(1 for m in msgs if t <= m[0] < t + 10)) for t in range(int(t0), int(t1), 10)]
+        chat, counts = _chat_around(video_id, moment)
         prompt = _prompt(info, moment, ev, lines, chat, counts)
         st.set(transcript_lines=len(lines), chat_messages=len(chat), characters=len(prompt), tokens_about=len(prompt) // 4)
         st.done(f"{len(lines)} transcript lines + {len(chat):,} chat messages · about {len(prompt) // 4:,} tokens")
+
+    model, cut = _ask(prompt, Cut, run, moment["peak"])
+    with run.step("cut") as st:
+        start, end, exact = cut_times(lines, cut)
+        st.set(start_line=cut.start_line, start_words=cut.start_words,
+               end_line=cut.end_line, end_words=cut.end_words, words_found=exact)
+        st.done(f"{_mmss(start)} → {_mmss(end)} ({end - start:.1f} s)"
+                + ("" if exact else " · words not found, used whole lines"))
+    result = {"model": model, "peak": moment["peak"], **cut.model_dump(mode="json"),
+              "best_start": start, "best_end": end, "words_found": exact,
+              "transcript": [{k: l[k] for k in ("n", "start", "end", "text")} for l in lines],
+              "chat_sent": len(chat)}
+    return _save(video_id, moment["peak"], result, run)
+
+
+def _save(video_id: str, peak: float, result: dict, run, chat_only: bool = False) -> dict:
+    with run.step("save") as st:
+        p = answer_path(video_id, peak, chat_only)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(result, ensure_ascii=False, indent=1))
+        st.done(str(p.relative_to(ROOT)))
+    return result
+
+
+def _chat_around(video_id: str, moment: dict) -> tuple[list, list]:
+    """Chat of the spike (no bots/!commands) and messages per 10 s over 2 minutes."""
+    from .cli import load_ignore_users
+    from .detector import Rules, keep_message
+    from .evidence import messages_between
+
+    t0, t1 = moment["peak"] - BEFORE, moment["peak"] + AFTER
+    rules = Rules(ignore_users=load_ignore_users())
+    msgs = [m for m in messages_between(video_id, t0, t1) if keep_message(m[1], m[2], rules)]
+    chat = [m for m in msgs if moment["clip_start"] <= m[0] <= moment["clip_end"]][:MAX_CHAT]
+    counts = [(t, sum(1 for m in msgs if t <= m[0] < t + 10)) for t in range(int(t0), int(t1), 10)]
+    return chat, counts
+
+
+def explain_chat(video_id: str, info: dict, moment: dict, ev: dict, run=None) -> dict:
+    """Live mode: ask Gemini about one moment from chat only (captions don't exist yet). No exact cut."""
+    from . import activity
+
+    run = run or activity.NULL
+    if not api_key():
+        raise GeminiError("No Gemini key. Put GEMINI_API_KEY=... in the project's .env file "
+                          "(free key: aistudio.google.com → Get API key).")
+    with run.step("prompt") as st:
+        chat, counts = _chat_around(video_id, moment)
+        prompt = _chat_prompt(info, moment, ev, chat, counts)
+        st.set(chat_messages=len(chat), characters=len(prompt), tokens_about=len(prompt) // 4)
+        st.done(f"{len(chat):,} chat messages, no captions · about {len(prompt) // 4:,} tokens")
+    model, guess = _ask(prompt, ChatGuess, run, moment["peak"])
+    result = {"model": model, "peak": moment["peak"], "chat_only": True, **guess.model_dump(mode="json"),
+              "chat_sent": len(chat)}
+    return _save(video_id, moment["peak"], result, run, chat_only=True)
+
+
+def _ask(prompt: str, schema, run, peak: float):
+    """Send one question, trying the free models in order. Returns (model, parsed answer)."""
+    global _last_call
 
     def say(step, msg: str) -> None:
         log(msg)
@@ -278,28 +381,13 @@ def explain(video_id: str, info: dict, moment: dict, ev: dict, run=None) -> dict
                     time.sleep(wait)
                 _last_call = time.time()
                 g.detail(f"asking {model} (try {attempt + 1}), waiting for the answer… (up to {TIMEOUT} s)")
-                say(g, f"asking {model} about {_mmss(moment['peak'])} (attempt {attempt + 1}, ~{len(prompt) // 4:,} tokens)")
+                say(g, f"asking {model} about {_mmss(peak)} (attempt {attempt + 1}, ~{len(prompt) // 4:,} tokens)")
                 try:
-                    cut = _call(model, prompt)
+                    answer = _call(model, prompt, schema)
                     say(g, f"{model} answered in {time.time() - _last_call:.0f} s")
-                    g.set(seconds=round(time.time() - _last_call, 1), viral_score=cut.viral_score)
-                    g.done(f"{model} answered: “{cut.title}” · {cut.viral_score}/10 · confidence {cut.confidence}")
-                    with run.step("cut") as st:
-                        start, end, exact = cut_times(lines, cut)
-                        st.set(start_line=cut.start_line, start_words=cut.start_words,
-                               end_line=cut.end_line, end_words=cut.end_words, words_found=exact)
-                        st.done(f"{_mmss(start)} → {_mmss(end)} ({end - start:.1f} s)"
-                                + ("" if exact else " · words not found, used whole lines"))
-                    with run.step("save") as st:
-                        result = {"model": model, "peak": moment["peak"], **cut.model_dump(mode="json"),
-                                  "best_start": start, "best_end": end, "words_found": exact,
-                                  "transcript": [{k: l[k] for k in ("n", "start", "end", "text")} for l in lines],
-                                  "chat_sent": len(chat)}
-                        p = answer_path(video_id, moment["peak"])
-                        p.parent.mkdir(parents=True, exist_ok=True)
-                        p.write_text(json.dumps(result, ensure_ascii=False, indent=1))
-                        st.done(str(p.relative_to(ROOT)))
-                    return result
+                    g.set(seconds=round(time.time() - _last_call, 1), viral_score=answer.viral_score)
+                    g.done(f"{model} answered: “{answer.title}” · {answer.viral_score}/10 · confidence {answer.confidence}")
+                    return model, answer
                 except GeminiError as e:
                     code, _, msg = str(e).partition("|")
                     last_err = f"{model}: {msg}"

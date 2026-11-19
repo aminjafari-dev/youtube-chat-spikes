@@ -18,6 +18,34 @@ def youtube_link(video_id: str, seconds: float) -> str:
     return f"https://youtu.be/{video_id}?t={int(seconds)}"
 
 
+TOP_MOMENTS = 200
+
+
+def window_row(w: Window) -> list:
+    """Compact window for the page: [start, score, messages, people, normal_level, spike]."""
+    return [int(w.start), round(w.score, 1), w.raw, w.users, round(w.baseline, 1), int(w.is_spike)]
+
+
+def spike_json(s: Spike) -> dict:
+    return {"peak": s.peak.start, "clip_start": s.clip_start, "clip_end": s.clip_end,
+            "score": round(s.peak.score, 1), "ratio": round(s.peak.ratio, 1),
+            "people": s.peak.users, "samples": s.peak.samples}
+
+
+def ranked(spikes: list[Spike]) -> list[dict]:
+    """Moments for the page, biggest first."""
+    return [spike_json(s) for s in sorted(spikes, key=lambda s: -s.peak.score)[:TOP_MOMENTS]]
+
+
+def save_outputs(out: Path, video_id: str, title: str, windows: list[Window], spikes: list[Spike],
+                 rules: Rules) -> None:
+    """windows.csv, spikes.csv and chart.html in output/<video>/."""
+    out.mkdir(parents=True, exist_ok=True)
+    write_windows(out / "windows.csv", windows)
+    write_spikes(out / "spikes.csv", spikes, video_id)
+    write_chart(out / "chart.html", windows, spikes, rules, title, video_id)
+
+
 def write_windows(path: Path, windows: list[Window]) -> None:
     with path.open("w", newline="") as f:
         w = csv.writer(f)

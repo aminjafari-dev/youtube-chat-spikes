@@ -7,7 +7,8 @@
   let selRun = null, selStep = null, follow = true, tab = "runs", showFiles = false;
   let dirty = false;
 
-  const KIND = { analyze: { icon: "📈", name: "Analyze stream" }, evidence: { icon: "💬", name: "Chat evidence" }, ai: { icon: "🤖", name: "AI check" } };
+  const KIND = { analyze: { icon: "📈", name: "Analyze stream" }, evidence: { icon: "💬", name: "Chat evidence" },
+    ai: { icon: "🤖", name: "AI check" }, live: { icon: "🔴", name: "Live watch" } };
   const STATUS = { waiting: "waiting", running: "running", done: "done", error: "failed", skipped: "skipped", cancelled: "cancelled", queued: "queued" };
   const ICON = { waiting: "○", running: "", done: "✓", error: "✕", skipped: "–", cancelled: "■", queued: "…" };
 
@@ -24,8 +25,30 @@
   const sorted = () => [...runs.values()].sort((a, b) => b.created - a.created);
   const running = () => sorted().filter((r) => r.status === "running" || r.status === "queued");
 
-  // ---- Open / close (remembered per browser) ----
+  // ---- The panel's markup (shared by every page: they only have an empty <section id="activity">) ----
   const panel = $("activity"), toggle = $("actToggle");
+  panel.innerHTML = `
+    <div class="act-side">
+      <div class="act-sidehead">
+        <div class="seg act-tabs" role="group" aria-label="Show">
+          <button type="button" data-tab="runs" class="on">Jobs</button>
+          <button type="button" data-tab="requests">Requests</button>
+        </div>
+        <span class="muted small" id="actLive"></span>
+      </div>
+      <ol id="actList" class="act-list"></ol>
+      <div class="act-opts small muted">
+        <label><input type="checkbox" id="actFollow" checked> Follow what's running</label>
+        <label><input type="checkbox" id="actFiles"> Show page files in requests</label>
+      </div>
+    </div>
+    <div class="act-main">
+      <div class="act-head" id="actHead"></div>
+      <div class="flow" id="actFlow"></div>
+      <div class="act-detail" id="actDetail"></div>
+    </div>`;
+
+  // ---- Open / close (remembered per browser) ----
   const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
                   set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
   function setOpen(open) {
@@ -109,7 +132,7 @@
           <span class="pill ${r.status}">${STATUS[r.status]}</span></div>
         <div class="row small muted"><span class="dots">${stepDots(r)}</span><span>${ago(r.created)} · ${dur(r.created, r.ended)}</span></div>
         ${r.result ? `<div class="small ell res">${esc(r.result)}</div>` : ""}
-      </li>`).join("") || '<li class="muted small pad">Nothing has run yet. Analyze a stream to see it here.</li>';
+      </li>`).join("") || '<li class="muted small pad">Nothing has run yet. Analyze or watch a stream to see it here.</li>';
   }
 
   $("actList").addEventListener("click", (e) => {

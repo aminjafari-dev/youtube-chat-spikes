@@ -155,6 +155,15 @@ class Detector:
             self.current = Window(start=nxt)
         return done
 
+    def restart(self) -> list[Window]:
+        """Live mode: there is a hole in the recording (app was off, reconnect). Close the current window
+        and learn the normal level again, so the hole doesn't look like a quiet period followed by a spike."""
+        done = self.flush()
+        self.current = None
+        self._per_user = Counter()
+        self._recent.clear()
+        return done
+
     def flush(self) -> list[Window]:
         return [self._close()] if self.current is not None else []
 

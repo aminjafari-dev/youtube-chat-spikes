@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chat Spikes · Finished stream</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <a class="home" href="/" title="Back to the start page">←</a>
+      <span class="dot" id="busyDot"></span>
+      <h1>Chat Spikes <span class="mode">Finished stream</span></h1>
+    </div>
+    <button type="button" id="actToggle" class="act-toggle" aria-expanded="false" aria-controls="activity">
+      <span class="act-dot"></span>Activity<span class="act-count" id="actCount" hidden></span>
+    </button>
+    <form id="form" class="controls">
+      <input id="url" type="text" placeholder="Paste a finished YouTube stream link…" autocomplete="off">
+      <button id="btn" type="submit">Analyze</button>
+    </form>
+  </header>
+
+  <section id="activity" class="activity" hidden aria-label="Activity"></section>
+
+  <div class="statusbar">
+    <p id="status" class="status">Paste the link of a stream that has ended, then press Analyze.</p>
+    <div class="progress" id="progressWrap" hidden>
+      <div class="track"><div class="fill" id="progressFill"></div></div>
+      <span class="small muted" id="progressText"></span>
+    </div>
+  </div>
+
+  <main class="grid">
+    <section class="left">
+      <div class="player" id="player">
+        <div class="placeholder">The stream recording will show here</div>
+      </div>
+      <div data-part="why"></div>
+      <div class="tiles">
+        <div class="tile"><span class="label">Stream length</span><span class="value" id="tLen">–</span><span class="sub" id="tChannel">&nbsp;</span></div>
+        <div class="tile"><span class="label">Chat messages</span><span class="value" id="tMsgs">–</span><span class="sub" id="tMsgsSub">in the replay</span></div>
+        <div class="tile"><span class="label">Normal level</span><span class="value" id="tBase">–</span><span class="sub">per 10 s (typical)</span></div>
+        <div class="tile hot-tile"><span class="label">Biggest spike</span><span class="value" id="tTop">–</span><span class="sub" id="tTopSub">&nbsp;</span></div>
+      </div>
+      <div data-part="chart" data-title="Chat activity across the whole stream"
+           data-empty="The chart fills in as the chat replay is read."></div>
+    </section>
+
+    <aside class="right">
+      <div data-part="moments"></div>
+      <div data-part="chat"></div>
+    </aside>
+  </main>
+
+  <script type="module" src="finished.js"></script>
+  <script src="activity.js"></script>
+</body>
+</html>

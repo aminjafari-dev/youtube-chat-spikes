@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chat Spikes · Live</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <a class="home" href="/" title="Back to the start page">←</a>
+      <span class="dot" id="busyDot"></span>
+      <h1>Chat Spikes <span class="mode live-mode">Live</span></h1>
+    </div>
+    <button type="button" id="actToggle" class="act-toggle" aria-expanded="false" aria-controls="activity">
+      <span class="act-dot"></span>Activity<span class="act-count" id="actCount" hidden></span>
+    </button>
+    <form id="form" class="controls">
+      <input id="url" type="text" placeholder="Paste the link of a stream that is live now…" autocomplete="off">
+      <button id="btn" type="submit">Watch live</button>
+    </form>
+  </header>
+
+  <section id="activity" class="activity" hidden aria-label="Activity"></section>
+
+  <div class="statusbar">
+    <span class="livepill" id="livePill" hidden>LIVE</span>
+    <p id="status" class="status">Paste the link of a stream that is live right now, then press Watch live.</p>
+  </div>
+
+  <main class="grid">
+    <section class="left">
+      <div class="player" id="player">
+        <div class="placeholder">The live stream will show here</div>
+      </div>
+      <div class="player-bar" id="playerBar" hidden>
+        <span class="small muted" id="playerPos"></span>
+        <button type="button" class="golive" id="goLive"><i class="live-dot"></i>Back to live</button>
+      </div>
+      <div data-part="why"></div>
+      <div class="tiles tiles-5">
+        <div class="tile"><span class="label">Live for</span><span class="value" id="tLive">–</span><span class="sub" id="tChannel">&nbsp;</span></div>
+        <div class="tile"><span class="label">Messages</span><span class="value" id="tMsgs">–</span><span class="sub" id="tMsgsSub">read so far</span></div>
+        <div class="tile"><span class="label">Per minute</span><span class="value" id="tRate">–</span><span class="sub" id="tRateSub">last minute</span></div>
+        <div class="tile"><span class="label">Normal level</span><span class="value" id="tBase">–</span><span class="sub">per 10 s (last 5 min)</span></div>
+        <div class="tile hot-tile"><span class="label">Biggest spike</span><span class="value" id="tTop">–</span><span class="sub" id="tTopSub">&nbsp;</span></div>
+      </div>
+      <div data-part="chart" data-title="Chat activity, live"
+           data-empty="The chart starts after the first 10 seconds of chat."
+           data-hint="Click anywhere on the chart to rewind the live player to that time. Chat reaches the app about 10–15 s late."></div>
+    </section>
+
+    <aside class="right">
+      <div data-part="moments"></div>
+      <div data-part="chat"></div>
+    </aside>
+  </main>
+
+  <script type="module" src="live.js"></script>
+  <script src="activity.js"></script>
+</body>
+</html>
