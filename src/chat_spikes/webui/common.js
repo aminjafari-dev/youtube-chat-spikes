@@ -334,6 +334,7 @@ export function createSpikeView(opts) {
     if (!c) return "";
     if (ACTIVE.includes(c.state)) return '<span class="cbadge wait" title="Making the reel">🎬…</span>';
     if (c.state === "done") return '<span class="cbadge" title="Reel ready">🎬</span>';
+    if (c.state === "cancelled") return "";
     return '<span class="cbadge err" title="The reel failed">🎬!</span>';
   }
 
@@ -353,7 +354,7 @@ export function createSpikeView(opts) {
     }
     clearTimeout(clipTimer);
     const busy = Object.values(v.clips).some((c) => ACTIVE.includes(c.state));
-    if (busy || opts.pollClips) clipTimer = setTimeout(() => v.loadClips(), busy ? 3000 : 8000);
+    if (busy || opts.pollClips) clipTimer = setTimeout(() => v.loadClips(), busy ? 1000 : 8000);
   };
 
   async function clipCall(action, params) {
@@ -381,10 +382,12 @@ export function createSpikeView(opts) {
         <p class="muted small">${layoutNote} yt-dlp downloads only these ${Math.round(s.clip_end - s.clip_start)} seconds; ffmpeg makes the reel on your Mac.</p>`;
       $("clipMake").onclick = () => makeClip(s);
     } else if (ACTIVE.includes(c.state)) {
-      body.innerHTML = `<p class="ai-wait"><span class="spin"></span>${c.state === "queued" ? "In the queue" : c.state === "waiting" ? "Waiting for the live video" : "Making the reel"}… ${esc(c.note || "")}</p>
-        <p class="muted small">Follow each step on the Activity panel.</p>`;
-    } else if (c.state === "error") {
-      body.innerHTML = `<p class="err small">The reel failed: ${esc(c.note)}</p><button class="askbtn" id="clipMake">Try again</button>`;
+      body.innerHTML = `<p class="ai-wait"><span class="spin"></span>${c.state === "queued" ? "In line" : c.state === "waiting" ? "Waiting for the live video" : "Making the reel"}… ${esc(c.note || "")}</p>
+        ${clipFlow(c)}`;
+      bindFlow(c);
+    } else if (c.state === "error" || c.state === "cancelled") {
+      body.innerHTML = `<p class="${c.state === "error" ? "err " : "muted "}small">${c.state === "error" ? `The reel failed: ${esc(c.note)}` : "Cancelled."}</p>${clipFlow(c)}<button class="askbtn" id="clipMake">Try again</button>`;
+      bindFlow(c);
       $("clipMake").onclick = () => makeClip(s);
     } else {
       const src = `/clips/${v.vid}/${cname(s)}`;
@@ -409,6 +412,28 @@ export function createSpikeView(opts) {
       $("clipRemake").onclick = () => makeClip(s);
       $("clipBox").onclick = () => boxEditor(s, face);
     }
+  }
+
+  // The reel's job as a chain of nodes (the same steps as on the Activity panel).
+  const NODE_ICON = { waiting: "○", done: "✓", error: "✕", skipped: "–", cancelled: "■" };
+  function clipFlow(c) {
+    if (!c.steps) return "";
+    const nextKey = (c.steps.find((x) => x[2] === "waiting") || [])[0];
+    return `<div class="miniflow">${c.steps.map(([key, label, status, text, progress], i) => `
+      <div class="mnode ${status}${key === nextKey && c.state !== "error" ? " next" : ""}" title="${esc(text || "")}">
+        <span class="mhead"><span class="num">${i + 1}</span><span class="st">${status === "running" ? '<span class="spin"></span>' : NODE_ICON[status] || ""}</span></span>
+        <span class="mlabel">${esc(label)}</span>
+        ${progress != null && status === "running" ? `<span class="nbar"><i style="width:${Math.round(progress * 100)}%"></i></span>` : ""}
+        <span class="mtext">${esc(key === nextKey && status === "waiting" && c.state !== "error" ? "up next" : text || status)}</span>
+      </div>`).join('<span class="mlink"></span>')}</div>
+      <div class="boxbtns">${c.run ? '<button class="ghostbtn" id="clipJob">Open this job in Activity</button>' : ""}
+        ${ACTIVE.includes(c.state) ? '<button class="ghostbtn" id="clipCancel">Cancel</button>' : ""}</div>`;
+  }
+  function bindFlow(c) {
+    const b = $("clipJob");
+    if (b) b.onclick = () => window.openActivityRun && window.openActivityRun(c.run);
+    const x = $("clipCancel");
+    if (x) x.onclick = () => clipCall("cancel", { peak: c.peak }).catch(() => {});
   }
 
   function boxEditor(s, face) {

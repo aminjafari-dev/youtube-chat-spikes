@@ -326,6 +326,8 @@ class Handler(BaseHTTPRequestHandler):
                 if m["clip_end"] - m["clip_start"] < 3 or m["clip_end"] - m["clip_start"] > 180:
                     return self.send_json({"error": "A clip must be 3 s to 3 min long."})
                 clips.make(vid, m, channel, title)
+            elif action == "cancel":
+                clips.cancel(vid, float(g("peak", "0")))
             elif action == "layout":
                 box = lambda k: None if g(k, "none") == "none" else [float(x) for x in g(k).split(",")]
                 old = clips.layout_for(channel, vid)

@@ -194,6 +194,14 @@
 
   // Redraw on changes, and every second while something runs (live durations).
   setInterval(() => { if (dirty || running().length) render(); }, 500);
+  // Other parts of the page (e.g. the reel card) can open one job here.
+  window.openActivityRun = (id) => {
+    if (!runs.has(id)) return;
+    selRun = id; selStep = null; follow = false; $("actFollow").checked = false; tab = "runs";
+    panel.querySelectorAll(".act-tabs button").forEach((x) => x.classList.toggle("on", x.dataset.tab === "runs"));
+    setOpen(true);
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
   setOpen(store.get("activityOpen") === "1");
   connect();
 })();

@@ -157,8 +157,17 @@ Each moment can become a reel for Shorts / Reels / TikTok:
 - The moment list shows 🎬 when its reel is ready (🎬… while it is being made). The reel card plays it and has
   **Download**, **Make again** and the face-cam box.
 - Saved in `data/clips/<video>/<peak>.mp4` (plus a `.jpg` frame and a `.json` with the times and the layout).
-- Each reel is a **Reel** job on the Activity panel: Wait for the video (live only) → Download the piece → Make the reel.
-  One reel is made at a time.
+- Each reel is a **Reel** job with 6 connected nodes: In line → Check the stream → Wait for the video (live only) →
+  Download the piece → Make the reel → Save. Download and Make the reel show a progress bar. The same nodes show
+  inside the reel card, with **Open this job in Activity** and **Cancel**. One reel is made at a time.
+- **Best quality**: yt-dlp picks the highest resolution, then frame rate, then bitrate (`-S res,fps,br`), with no
+  size limit. The reel keeps the source frame rate (60 fps) and is encoded with x264 `-preset slow -crf 16`.
+  YouTube's live feed tops out at 1080p60. The Download node shows the quality it got.
+- **Audio sync (live)**: YouTube's live video and audio lists have different lengths, so the downloaded video and
+  audio can start a few seconds apart (seen: 6 s). The app reads each one's start time from ffmpeg's log and cuts
+  each one at the same stream moment.
+- Speed depends on your internet: with a slow connection, live reels can wait in line until their moment is
+  older than the ~15 minutes the live feed keeps, and then fail.
 - Needs **ffmpeg** (`brew install ffmpeg`). yt-dlp does all the downloading; ffmpeg only works on the
   downloaded file on your Mac.
 
