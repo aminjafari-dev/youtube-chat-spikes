@@ -63,12 +63,18 @@ def _parse_json3(data: dict) -> list[list]:
     return words
 
 
-def words(video_id: str) -> list[list]:
+def words(video_id: str, step=None) -> list[list]:
     """All words of the stream with their times. Downloads once (a few seconds), then reads the saved copy."""
+    from .activity import NULL
+    step = step or NULL
     path = _words_path(video_id)
     with _lock:
         if path.exists():
-            return json.loads(path.read_text())
+            result = json.loads(path.read_text())
+            step.set(source="saved copy", words=len(result), file=f"data/raw/{path.name}")
+            step.log(f"read saved captions: {len(result):,} words")
+            return result
+        step.detail("asking YouTube which captions this stream has…")
         r = subprocess.run(_ytdlp("--skip-download", "--dump-single-json",
                                   f"https://www.youtube.com/watch?v={video_id}"),
                            capture_output=True, text=True, timeout=120)
@@ -78,6 +84,9 @@ def words(video_id: str) -> list[list]:
         if not pick:
             raise TranscriptError("YouTube has no captions for this stream, so there is no transcript.")
         key, auto = pick
+        step.set(language=key, kind="automatic" if auto else "streamer's own")
+        step.log(f"using {'automatic' if auto else 'uploaded'} captions '{key}'")
+        step.detail(f"downloading captions '{key}'…")
         tmp = RAW / f"_subs_{video_id}"
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir(parents=True)
@@ -96,6 +105,8 @@ def words(video_id: str) -> list[list]:
         if not result:
             raise TranscriptError("The captions of this stream are empty.")
         path.write_text(json.dumps(result, ensure_ascii=False, separators=(",", ":")))
+        step.set(source="downloaded", words=len(result), file=f"data/raw/{path.name}")
+        step.log(f"downloaded {len(result):,} words")
         return result
 
 

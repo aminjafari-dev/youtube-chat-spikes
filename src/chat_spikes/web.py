@@ -14,10 +14,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from . import activity
 from .cli import load_ignore_users, video_id_from_or_none
 from .detector import Detector, Rules, Spike, Window, group_spikes, keep_message
 from .replay import RAW, ROOT, ReplayError, StreamInfo, load
-from .report import write_chart, write_spikes, write_windows
+from .report import hms, write_chart, write_spikes, write_windows
 
 WEB = Path(__file__).parent / "webui"
 PORT = 8765
@@ -43,8 +44,46 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # keep the terminal quiet
         pass
 
+    def send_response(self, code, message=None):
+        self._status = code
+        super().send_response(code, message)
+
     def do_GET(self):
         u = urlparse(self.path)
+        if u.path == "/api/activity":
+            return self.activity_stream()
+        started, self._status = time.time(), 0
+        try:
+            self.route(u)
+        finally:  # every request shows up on the Activity panel
+            activity.request("GET", self.path, self._status, time.time() - started, started)
+
+    def activity_stream(self) -> None:
+        """Live feed for the Activity panel: a snapshot, then every change as it happens."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        try:
+            snap = activity.snapshot()
+            self.send_event("snapshot", snap)
+            seq = snap["seq"]
+            while True:
+                seq, events = activity.wait_changes(seq)
+                if events is None:
+                    snap = activity.snapshot()
+                    self.send_event("snapshot", snap)
+                    seq = snap["seq"]
+                    continue
+                if not events:
+                    self.wfile.write(b": keep-alive\n\n")
+                    self.wfile.flush()
+                for e in events:
+                    self.send_event(e["type"], e["data"])
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+
+    def route(self, u) -> None:
         qs = parse_qs(u.query)
         if u.path == "/api/analyze":
             return self.analyze(qs)
@@ -93,7 +132,7 @@ class Handler(BaseHTTPRequestHandler):
     def why(self, qs: dict) -> None:
         """Why did chat explode? Free chat evidence, plus Gemini's answer when ai=1 (or saved earlier)."""
         from .evidence import evidence
-        from .gemini import GeminiError, api_key, explain, saved_answer
+        from .gemini import AI_STEPS, GeminiError, api_key, explain, saved_answer
         from .replay import cached
 
         g = lambda k, d="0": (qs.get(k) or [d])[0]
@@ -102,16 +141,43 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_bytes(b'{"error": "Analyze the stream first."}', "application/json")
         moment = {"peak": float(g("peak")), "clip_start": float(g("clip_start")), "clip_end": float(g("clip_end")),
                   "score": float(g("score")), "ratio": float(g("ratio"))}
-        ev = evidence(vid, moment["clip_start"], moment["clip_end"])
-        out = {"evidence": {k: v for k, v in ev.items() if k != "sample"}, "has_key": bool(api_key()),
-               "ai": saved_answer(vid, moment["peak"])}
-        if g("ai") == "1" and not out["ai"]:
-            info = cached(vid)
+        info = cached(vid)
+        name = f"{info.channel or info.title} · " if info else ""
+        target = {"video": vid, "title": info.title if info else "", "peak": moment["peak"],
+                  "clip": [moment["clip_start"], moment["clip_end"]]}
+        saved = saved_answer(vid, moment["peak"])
+        ask_ai = g("ai") == "1" and not saved
+        if ask_ai:
+            run = activity.start("ai", f"AI check · {name}moment {hms(moment['peak'])}", target, AI_STEPS)
+        else:
+            run = activity.start("evidence", f"Chat evidence · {name}moment {hms(moment['peak'])}", target, [
+                ("evidence", "Chat evidence", "Counts the chat of this moment on your Mac: reaction mix, words that "
+                 "stand out, most repeated message. Free, no AI."),
+                ("saved", "Saved AI answer?", "Looks in data/processed/why/ for an AI answer from before. "
+                 "Nothing is sent to Gemini here.")])
+        with run.step("evidence") as st:
+            ev = evidence(vid, moment["clip_start"], moment["clip_end"])
+            kws = ", ".join(k["text"] for k in ev["keywords"]) or "nothing stands out"
+            st.set(messages=ev.get("messages"), keywords=[k["text"] for k in ev["keywords"]],
+                   reaction={t["label"]: t["share"] for t in ev["types"]})
+            st.done(f"{hms(moment['clip_start'])}–{hms(moment['clip_end'])} · chat kept saying: {kws}")
+        out = {"evidence": {k: v for k, v in ev.items() if k != "sample"}, "has_key": bool(api_key()), "ai": saved}
+        if not ask_ai:
+            with run.step("saved") as st:
+                st.done(f"yes, from {saved['model']}" if saved else "none yet")
+            run.finish("done", "evidence ready")
+        else:
             try:
                 out["ai"] = explain(vid, {"title": info.title if info else "", "channel": info.channel if info else ""},
-                                    moment, ev)
+                                    moment, ev, run)
+                a = out["ai"]
+                run.finish("done", f"cut {hms(a['best_start'])} → {hms(a['best_end'])} · {a['viral_score']}/10")
             except GeminiError as e:
                 out["ai_error"] = str(e).split("|", 1)[-1]
+                for st in run.steps.values():
+                    if st.status == "running":
+                        st.fail(out["ai_error"])
+                run.finish("error", out["ai_error"])
         self.send_bytes(json.dumps(out, ensure_ascii=False).encode(), "application/json")
 
     def analyze(self, qs: dict) -> None:
@@ -129,18 +195,39 @@ class Handler(BaseHTTPRequestHandler):
         det = Detector(rules)
         stop = threading.Event()
         state: dict = {"info": None, "reached": 0.0, "count": 0}
+        run = activity.start("analyze", f"Analyze stream · {vid}", {"video": vid}, [
+            ("check", "Check the video", "Asks YouTube (through yt-dlp) for the title and length, and checks it is a "
+             "finished stream with chat replay. Instant when the chat was saved before."),
+            ("chat", "Get the chat replay", "Downloads every chat message with yt-dlp, a few seconds of stream at a "
+             "time, or reads the saved copy in data/raw/."),
+            ("detect", "Find spikes", f"Cuts chat into {rules.window}-second windows, compares each with the normal "
+             f"level (×{rules.threshold} or far above normal swings, at least {rules.min_score}), merges spikes into "
+             "moments. Runs while the chat downloads."),
+            ("save", "Save results", "Writes windows.csv, spikes.csv and chart.html to output/<video>/."),
+        ])
+        self.run = run
         self.send_event("rules", {"window": rules.window, "threshold": rules.threshold,
                                   "min_score": rules.min_score, "lead": rules.lead, "tail": rules.tail})
 
         def on_info(info: StreamInfo, from_cache: bool) -> None:
             state["info"] = info
+            run.title = f"Analyze stream · {info.channel or info.title}"
+            run.target.update(title=info.title, channel=info.channel, duration=info.duration)
+            run.step("check").set(title=info.title, channel=info.channel, length=hms(info.duration), saved_before=from_cache)
+            run.step("check").done(f"{info.title} · {hms(info.duration)}" + (" · saved before" if from_cache else ""))
+            run.step("chat").begin("reading the saved copy…" if from_cache else "downloading with yt-dlp…")
+            run.step("detect").begin("waiting for chat…")
             self.send_event("info", {"video_id": info.video_id, "title": info.title, "channel": info.channel,
                                      "duration": info.duration, "cached": from_cache})
 
         def on_progress(reached: float, count: int) -> None:
             state["reached"], state["count"] = reached, count
+            dur = state["info"].duration if state["info"] else 0
+            run.step("chat").detail(f"{hms(reached)} of {hms(dur)} · {count:,} messages",
+                                    reached / dur if dur else None)
 
         self.send_event("status", "Checking the video…")
+        run.step("check").begin("asking YouTube…")
         pending: list[Window] = []
         last_sent = time.time()
         total = 0
@@ -153,15 +240,29 @@ class Handler(BaseHTTPRequestHandler):
                     pending, last_sent = [], time.time()
             pending += det.flush()
             self.flush_progress(det, pending, state, total, rules)
+            run.step("chat").set(messages=total)
+            run.step("chat").done(f"{total:,} messages")
             spikes = group_spikes(det.windows, rules)
+            top = max(spikes, key=lambda s: s.peak.score, default=None)
+            run.step("detect").set(windows=len(det.windows), moments=len(spikes))
+            run.step("detect").done(f"{len(spikes)} moments from {len(det.windows):,} windows"
+                                    + (f" · biggest at {hms(top.peak.start)}" if top else ""))
             self.send_event("done", {"messages": total, "moments": ranked(spikes), "all_moments": len(spikes)})
-            self.save(vid, state["info"], det.windows, spikes, rules)
+            with run.step("save") as st:
+                self.save(vid, state["info"], det.windows, spikes, rules)
+                st.done(f"output/{vid}/")
+            run.finish("done", f"{len(spikes)} moments · {total:,} messages")
         except ReplayError as e:
+            for st in run.steps.values():
+                if st.status == "running":
+                    st.fail(str(e))
+            run.finish("cancelled" if str(e) == "Cancelled." else "error", str(e))
             self.send_event("error", str(e))
         except (BrokenPipeError, ConnectionResetError):
-            pass  # the page was closed or Cancel was pressed
+            run.finish("cancelled", "page closed or Cancel pressed")
         finally:
             stop.set()
+            run.finish("error", "stopped unexpectedly")  # no-op when already finished
 
     def flush_progress(self, det: Detector, pending: list[Window], state: dict, total: int, rules: Rules) -> None:
         if pending:
@@ -170,7 +271,9 @@ class Handler(BaseHTTPRequestHandler):
         reached = max(state["reached"], det.windows[-1].start if det.windows else 0)
         self.send_event("progress", {"reached": reached, "duration": info.duration if info else 0,
                                      "messages": total})
-        self.send_event("moments", ranked(group_spikes(det.windows, rules)))
+        moments = group_spikes(det.windows, rules)
+        self.send_event("moments", ranked(moments))
+        self.run.step("detect").detail(f"{len(det.windows):,} windows checked · {len(moments)} moments so far")
 
     def save(self, vid: str, info: StreamInfo | None, windows, spikes, rules) -> None:
         out = ROOT / "output" / vid
@@ -182,6 +285,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     port = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv else PORT
+    activity.load_history()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.daemon_threads = True
     url = f"http://localhost:{port}"

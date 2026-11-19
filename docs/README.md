@@ -103,6 +103,26 @@ Free-tier requests may be used by Google to improve its products (public stream 
 Tested 2026-11-19 on IShowSpeed: `gemini-4-hydrogen` answered after about 4 min of busy retries;
 another moment fell back to `gemini-3.5-flash-lite`, which answered in 3 s.
 
+## Activity panel (see everything the app does)
+
+Press **Activity** at the top of the page. It shows every job the app runs, live, as a chain of steps
+(like n8n): green ✓ = done, blue spinner = running now (with a progress bar where it can), dashed
+"up next" = what runs after it, red ✕ = failed (with the reason), faded = skipped.
+The number on the button = jobs running right now.
+
+- **Jobs** (left): every job, newest first, with its step dots, how long it took and the result.
+  Jobs: *Analyze stream* (check video → get chat → find spikes → save),
+  *Chat evidence* (each moment you click), *AI check* (evidence → captions → build question →
+  wait for turn → ask Gemini → exact cut → save).
+- Click a job to see its flow, click a step to see what it does, its timing, its numbers and its log
+  (for Gemini: every model tried, every error, every retry).
+- **Requests**: every request the page made to the app, with status and time.
+- **Follow what's running** jumps to the job that is running now.
+- Finished jobs are kept in `data/processed/activity.jsonl`, so the history is still there after a restart.
+  Reloading the page reconnects to jobs that are still running.
+
+Code: `activity.py` (runs, steps, live feed at `/api/activity`), `webui/activity.js`.
+
 ## How long the download takes
 
 YouTube hands out chat replay a few seconds at a time, so yt-dlp reads it piece by piece.
@@ -150,8 +170,9 @@ The page shows a clear message for each case.
 | `src/chat_spikes/transcript.py` | Captions of the stream with a time per word (yt-dlp), cut into numbered lines |
 | `src/chat_spikes/gemini.py` | Text-only Gemini check: what happened + exact cut from the captions, model fallback, saved answers |
 | `src/chat_spikes/report.py` | CSV files and the standalone chart |
+| `src/chat_spikes/activity.py` | Records every job, its steps and every request; live feed for the Activity panel |
 | `src/chat_spikes/web.py` | Local web server for the page (`chat-spikes-web`) |
-| `src/chat_spikes/webui/` | The page: `index.html`, `style.css`, `app.js` |
+| `src/chat_spikes/webui/` | The page: `index.html`, `style.css`, `app.js`, `activity.js` |
 | `src/chat_spikes/cli.py` | Command line (`chat-spikes`) |
 
 ## Maintenance

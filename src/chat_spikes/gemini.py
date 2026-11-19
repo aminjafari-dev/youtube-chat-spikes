@@ -210,67 +210,110 @@ def _call(model: str, prompt: str) -> Cut:
     return resp.parsed
 
 
-def explain(video_id: str, info: dict, moment: dict, ev: dict) -> dict:
-    """Ask Gemini about one moment. Returns the saved answer dict."""
+AI_STEPS = [
+    ("evidence", "Chat evidence", "Counts the chat of this moment on your Mac: reaction mix, words that stand out, most repeated message. Free, no AI."),
+    ("captions", "Get captions", "What the streamer says, with a time for every word: YouTube's captions, downloaded once per stream with yt-dlp, then read from the saved copy."),
+    ("prompt", "Build the question", "Puts together the transcript from 1 minute before to 1 minute after the spike, every chat message of the spike and chat per 10 s. Text only."),
+    ("queue", "Wait for turn", "Free tier: one Gemini request at a time, at least 13 s apart, so the per-minute limit is never hit."),
+    ("gemini", "Ask Gemini", "Sends the question to the best free model. If a model is busy (503), slow (no answer in 60 s) or out of free quota, the next model is tried."),
+    ("cut", "Exact cut", "Finds the start and end words Gemini chose in YouTube's captions and takes their exact times (+0.3 s before, +0.7 s after)."),
+    ("save", "Save answer", "Saves the answer in data/processed/why/, so this moment never uses quota again."),
+]
+
+
+def explain(video_id: str, info: dict, moment: dict, ev: dict, run=None) -> dict:
+    """Ask Gemini about one moment. Returns the saved answer dict. `run` shows each step on the Activity panel."""
     global _last_call
+    from . import activity
     from .cli import load_ignore_users
     from .detector import Rules, keep_message
     from .evidence import messages_between
     from .transcript import TranscriptError, lines_between, words
 
+    run = run or activity.NULL
     saved = saved_answer(video_id, moment["peak"])
     if saved:
+        run.step("save").skip("answer was saved before")
         return saved
     if not api_key():
         raise GeminiError("No Gemini key. Put GEMINI_API_KEY=... in the project's .env file "
                           "(free key: aistudio.google.com → Get API key).")
     t0, t1 = moment["peak"] - BEFORE, moment["peak"] + AFTER
-    try:
-        lines = lines_between(words(video_id), t0, t1)
-    except TranscriptError as e:
-        raise GeminiError(str(e)) from None
-    if not lines:
-        raise GeminiError("Nothing is said in the captions around this moment, so there's nothing to cut on.")
-    rules = Rules(ignore_users=load_ignore_users())
-    msgs = [m for m in messages_between(video_id, t0, t1) if keep_message(m[1], m[2], rules)]  # no bots/!commands
-    chat = [m for m in msgs if moment["clip_start"] <= m[0] <= moment["clip_end"]][:MAX_CHAT]
-    counts = [(t, sum(1 for m in msgs if t <= m[0] < t + 10)) for t in range(int(t0), int(t1), 10)]
-    prompt = _prompt(info, moment, ev, lines, chat, counts)
+    with run.step("captions") as st:
+        try:
+            all_words = words(video_id, st)
+        except TranscriptError as e:
+            raise GeminiError(str(e)) from None
+        lines = lines_between(all_words, t0, t1)
+        if not lines:
+            last = all_words[-1][0] if all_words else 0
+            raise GeminiError("Nothing is said in the captions around this moment, so there's nothing to cut on"
+                              + (f" (the captions end at {_mmss(last)})." if last < t0 else "."))
+        st.done(f"{len(lines)} lines between {_mmss(t0)} and {_mmss(t1)}")
+    with run.step("prompt") as st:
+        rules = Rules(ignore_users=load_ignore_users())
+        msgs = [m for m in messages_between(video_id, t0, t1) if keep_message(m[1], m[2], rules)]  # no bots/!commands
+        chat = [m for m in msgs if moment["clip_start"] <= m[0] <= moment["clip_end"]][:MAX_CHAT]
+        counts = [(t, sum(1 for m in msgs if t <= m[0] < t + 10)) for t in range(int(t0), int(t1), 10)]
+        prompt = _prompt(info, moment, ev, lines, chat, counts)
+        st.set(transcript_lines=len(lines), chat_messages=len(chat), characters=len(prompt), tokens_about=len(prompt) // 4)
+        st.done(f"{len(lines)} transcript lines + {len(chat):,} chat messages · about {len(prompt) // 4:,} tokens")
+
+    def say(step, msg: str) -> None:
+        log(msg)
+        step.log(msg)
 
     last_err = "no model available"
     busy = False
+    q = run.step("queue").begin("waiting for any other Gemini request to finish")
     with _lock:  # one call at a time, spaced out for the free tier
+        q.done("my turn")
+        g = run.step("gemini").begin()
         for model in model_chain():
             for attempt in range(3):
+                g.set(model=model, attempt=attempt + 1)
                 wait = MIN_GAP - (time.time() - _last_call)
                 if wait > 0:
+                    g.detail(f"pausing {wait:.0f} s (free tier spacing) before asking {model}")
                     time.sleep(wait)
                 _last_call = time.time()
-                log(f"asking {model} about {_mmss(moment['peak'])} (attempt {attempt + 1}, ~{len(prompt) // 4:,} tokens)")
+                g.detail(f"asking {model} (try {attempt + 1}), waiting for the answer… (up to {TIMEOUT} s)")
+                say(g, f"asking {model} about {_mmss(moment['peak'])} (attempt {attempt + 1}, ~{len(prompt) // 4:,} tokens)")
                 try:
                     cut = _call(model, prompt)
-                    log(f"{model} answered in {time.time() - _last_call:.0f} s")
-                    start, end, exact = cut_times(lines, cut)
-                    result = {"model": model, "peak": moment["peak"], **cut.model_dump(mode="json"),
-                              "best_start": start, "best_end": end, "words_found": exact,
-                              "transcript": [{k: l[k] for k in ("n", "start", "end", "text")} for l in lines],
-                              "chat_sent": len(chat)}
-                    p = answer_path(video_id, moment["peak"])
-                    p.parent.mkdir(parents=True, exist_ok=True)
-                    p.write_text(json.dumps(result, ensure_ascii=False, indent=1))
+                    say(g, f"{model} answered in {time.time() - _last_call:.0f} s")
+                    g.set(seconds=round(time.time() - _last_call, 1), viral_score=cut.viral_score)
+                    g.done(f"{model} answered: “{cut.title}” · {cut.viral_score}/10 · confidence {cut.confidence}")
+                    with run.step("cut") as st:
+                        start, end, exact = cut_times(lines, cut)
+                        st.set(start_line=cut.start_line, start_words=cut.start_words,
+                               end_line=cut.end_line, end_words=cut.end_words, words_found=exact)
+                        st.done(f"{_mmss(start)} → {_mmss(end)} ({end - start:.1f} s)"
+                                + ("" if exact else " · words not found, used whole lines"))
+                    with run.step("save") as st:
+                        result = {"model": model, "peak": moment["peak"], **cut.model_dump(mode="json"),
+                                  "best_start": start, "best_end": end, "words_found": exact,
+                                  "transcript": [{k: l[k] for k in ("n", "start", "end", "text")} for l in lines],
+                                  "chat_sent": len(chat)}
+                        p = answer_path(video_id, moment["peak"])
+                        p.parent.mkdir(parents=True, exist_ok=True)
+                        p.write_text(json.dumps(result, ensure_ascii=False, indent=1))
+                        st.done(str(p.relative_to(ROOT)))
                     return result
                 except GeminiError as e:
                     code, _, msg = str(e).partition("|")
                     last_err = f"{model}: {msg}"
-                    log(f"{model} error {code}: {msg[:200]}")
+                    say(g, f"{model} error {code}: {msg[:200]}")
                     if code == "429":
                         # Per-minute limit: wait and retry. Daily / zero quota: try the next model.
                         delay = re.search(r"retry in ([\d.]+)s|retryDelay['\"]?: ?['\"]?(\d+)", msg)
                         per_day = re.search(r"per ?day|PerDay|limit: 0", msg, re.I)
                         if per_day or attempt == 2:
                             _dead_models.add(model)
+                            say(g, f"{model}: free quota used up, skipping it from now on")
                             break
-                        secs = float(next(g for g in delay.groups() if g)) if delay else 30
+                        secs = float(next(x for x in delay.groups() if x)) if delay else 30
+                        g.detail(f"{model}: per-minute limit, waiting {min(secs + 1, 65):.0f} s")
                         time.sleep(min(secs + 1, 65))
                         continue
                     if code in ("404", "400") and ("not found" in msg.lower() or "not supported" in msg.lower()):

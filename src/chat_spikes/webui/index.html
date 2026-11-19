@@ -12,11 +12,36 @@
       <span class="dot" id="busyDot"></span>
       <h1>Chat Spikes</h1>
     </div>
+    <button type="button" id="actToggle" class="act-toggle" aria-expanded="false" aria-controls="activity">
+      <span class="act-dot"></span>Activity<span class="act-count" id="actCount" hidden></span>
+    </button>
     <form id="form" class="controls">
       <input id="url" type="text" placeholder="Paste a finished YouTube stream link…" autocomplete="off">
       <button id="btn" type="submit">Analyze</button>
     </form>
   </header>
+
+  <section id="activity" class="activity" hidden aria-label="Activity">
+    <div class="act-side">
+      <div class="act-sidehead">
+        <div class="seg act-tabs" role="group" aria-label="Show">
+          <button type="button" data-tab="runs" class="on">Jobs</button>
+          <button type="button" data-tab="requests">Requests</button>
+        </div>
+        <span class="muted small" id="actLive"></span>
+      </div>
+      <ol id="actList" class="act-list"></ol>
+      <div class="act-opts small muted">
+        <label><input type="checkbox" id="actFollow" checked> Follow what's running</label>
+        <label><input type="checkbox" id="actFiles"> Show page files in requests</label>
+      </div>
+    </div>
+    <div class="act-main">
+      <div class="act-head" id="actHead"></div>
+      <div class="flow" id="actFlow"></div>
+      <div class="act-detail" id="actDetail"></div>
+    </div>
+  </section>
 
   <div class="statusbar">
     <p id="status" class="status">Paste the link of a stream that has ended, then press Analyze.</p>
@@ -88,5 +113,6 @@
   </main>
 
   <script src="app.js"></script>
+  <script src="activity.js"></script>
 </body>
 </html>
