@@ -358,6 +358,100 @@ def explain_chat(video_id: str, info: dict, moment: dict, ev: dict, run=None) ->
     return _save(video_id, moment["peak"], result, run, chat_only=True)
 
 
+# ---------- the hook on the reel ----------
+
+HOOK_WORDS = 10
+
+
+def cut_hook(text: str) -> str:
+    """At most HOOK_WORDS words (emoji don't count), no quotes, no hashtags."""
+    out, n = [], 0
+    for w in text.replace('"', "").replace("“", "").replace("”", "").split():
+        if w.startswith("#"):
+            continue
+        if any(c.isalnum() for c in w):
+            n += 1
+            if n > HOOK_WORDS:
+                break
+        out.append(w)
+    return " ".join(out)
+
+
+class ReelHook(BaseModel):
+    hook: str = Field(description=f"The caption: at most {HOOK_WORDS} words plus 1-2 emoji at the end, shown for the first 5 seconds.")
+    alternatives: list[str] = Field(description="2 other captions, same rules.")
+    why: str = Field(description="Why this hook makes a stranger watch to the end, 1 sentence.")
+
+
+def hook_path(video_id: str, peak: float) -> Path:
+    return ANSWERS / video_id / f"{int(peak)}.hook.json"
+
+
+def _hook_prompt(info: dict, moment: dict, lines: list[dict], chat: list[tuple], known: dict | None) -> str:
+    transcript = "\n".join(f'[{_mmss(l["start"])}] {l["text"]}' for l in lines) or \
+        "(no transcript: the stream is live, YouTube makes captions only after it ends)"
+    chat_txt = "\n".join(f"[{_mmss(t)}] {x}" for t, _, x in chat[:600])
+    about = ""
+    if known:
+        about = f"\nWhat happened (an earlier analysis): {known.get('what_happened', '')}\n" \
+                f"Why chat reacted: {known.get('why_chat_reacted', '')}\n"
+    return f"""You write the on-screen hook for a vertical short (TikTok / Reels / Shorts) cut from a livestream.
+
+Stream: "{info.get('title', '')}" by {info.get('channel', 'unknown')}.
+The clip runs {_mmss(moment['clip_start'])} → {_mmss(moment['clip_end'])}; chat exploded at {_mmss(moment['peak'])}.
+{about}
+WHAT THE STREAMER SAYS IN THE CLIP:
+{transcript}
+
+CHAT DURING THE CLIP:
+{chat_txt}
+
+Write the caption: dark text in a white box in the middle of the screen, between the streamer's face cam
+(top) and the game (bottom), shown for the FIRST 5 SECONDS only, then it disappears. It tells a stranger in one
+glance what this clip is and why to keep watching, like the best TikTok clip-channel captions, e.g.
+  "Lacy shows off how BIG the GTA VI Map is 😳🔥"
+  "Kai did NOT expect chat to do this 💀"
+Rules:
+- At most {HOOK_WORDS} words (5-9 is ideal), then 1-2 emoji at the end that fit the mood (😳 🔥 💀 😂 😭 🤯 👀 😤 🥶 🫡).
+  Simple single emoji only (no flags, no skin tones, no combined ones). No hashtags, no quotes around it.
+- Name the streamer if it helps (as people know them, e.g. their channel name). Normal sentence case, with ONE
+  or two words in CAPITALS for emphasis.
+- It must stop the scroll and make a stranger watch until the end: a curiosity gap, a bold claim, the
+  stakes. Don't spoil the payoff.
+- Controversial is good; lying is not. Base it on what really happens in the transcript and chat.
+  No slurs, no hate against groups, no invented crimes or accusations against real people.
+- English, written for people who have never heard of this streamer."""
+
+
+def reel_hook(video_id: str, info: dict, moment: dict, live_now: bool, run=None) -> dict:
+    """A caption (<= 10 words + emoji) for the reel's first 5 s, from the transcript (finished streams) and the chat. Saved, asked once."""
+    from . import activity
+    from .transcript import TranscriptError, lines_between, words
+
+    run = run or activity.NULL
+    p = hook_path(video_id, moment["peak"])
+    if p.exists():
+        return json.loads(p.read_text())
+    if not api_key():
+        raise GeminiError("No Gemini key (GEMINI_API_KEY in .env)")
+    with run.step("prompt") as st:
+        lines = []
+        if not live_now:
+            try:
+                lines = lines_between(words(video_id), moment["clip_start"], moment["clip_end"])
+            except TranscriptError as e:
+                st.log(f"no transcript: {e}")
+        chat, _ = _chat_around(video_id, moment)
+        prompt = _hook_prompt(info, moment, lines, chat, saved_answer(video_id, moment["peak"]))
+        st.done(f"{len(lines)} transcript lines + {len(chat):,} chat messages")
+    model, ans = _ask(prompt, ReelHook, run, moment["peak"])
+    result = {"model": model, "hook": cut_hook(ans.hook), "alternatives": [cut_hook(a) for a in ans.alternatives],
+              "why": ans.why, "transcript_lines": len(lines), "chat_sent": len(chat)}
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(result, ensure_ascii=False, indent=1))
+    return result
+
+
 def _ask(prompt: str, schema, run, peak: float):
     """Send one question, trying the free models in order. Returns (model, parsed answer)."""
     global _last_call
@@ -385,8 +479,11 @@ def _ask(prompt: str, schema, run, peak: float):
                 try:
                     answer = _call(model, prompt, schema)
                     say(g, f"{model} answered in {time.time() - _last_call:.0f} s")
-                    g.set(seconds=round(time.time() - _last_call, 1), viral_score=answer.viral_score)
-                    g.done(f"{model} answered: “{answer.title}” · {answer.viral_score}/10 · confidence {answer.confidence}")
+                    g.set(seconds=round(time.time() - _last_call, 1), viral_score=getattr(answer, "viral_score", None))
+                    if hasattr(answer, "viral_score"):
+                        g.done(f"{model} answered: “{answer.title}” · {answer.viral_score}/10 · confidence {answer.confidence}")
+                    else:
+                        g.done(f"{model} answered: “{answer.hook}”")
                     return model, answer
                 except GeminiError as e:
                     code, _, msg = str(e).partition("|")

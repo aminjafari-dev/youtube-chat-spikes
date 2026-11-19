@@ -322,7 +322,7 @@ export function createSpikeView(opts) {
     if (ask) ask.onclick = () => loadWhy(s, true);
   }
 
-  // ---- Reels (clips.py): face cam on top, the middle of the screen below, 1080×1920 ----
+  // ---- Reels (clips.py): face cam on top, the middle of the screen below, the hook between (9:16) ----
   v.clips = {}; v.clipLayout = null; v.clipChannel = "";
   const cname = (s) => String(Math.round(s.peak));
   const clipOf = (s) => v.clips[cname(s)];
@@ -364,7 +364,7 @@ export function createSpikeView(opts) {
     await v.loadClips(r);
   }
 
-  const makeClip = (s) => clipCall("make", { peak: s.peak, clip_start: s.clip_start, clip_end: s.clip_end })
+  const makeClip = (s, extra = {}) => clipCall("make", { peak: s.peak, clip_start: s.clip_start, clip_end: s.clip_end, ...extra })
     .catch((e) => { $("clipBody").insertAdjacentHTML("afterbegin", `<p class="err small">${esc(e.message)}</p>`); });
 
   function renderClip(s) {
@@ -374,7 +374,7 @@ export function createSpikeView(opts) {
     card.hidden = false;
     $("clipTitle").textContent = `Reel of ${clock(s.peak)}`;
     const face = v.clipLayout && v.clipLayout.face;
-    $("clipInfo").textContent = `${clock(s.clip_start)} → ${clock(s.clip_end)} · 1080×1920`;
+    $("clipInfo").textContent = `${clock(s.clip_start)} → ${clock(s.clip_end)}` + (c && c.width ? ` · ${c.width}×${c.height}` : "");
     const layoutNote = face ? `Face cam of <b>${esc(v.clipChannel || "this channel")}</b> on top, the middle of the screen below.`
       : `No face cam in this stream's reels: only the middle of the screen. If there is a face cam, draw its box on a frame of a reel.`;
     if (!c) {
@@ -398,6 +398,11 @@ export function createSpikeView(opts) {
           <div class="reel-side">
             <a class="askbtn" href="${src}.mp4?download=1&t=${stamp}">⬇ Download</a>
             <button class="ghostbtn" id="clipRemake">Make again</button>
+            <label class="small hooklbl">Hook (max 10 words + emoji, first 5 s of the reel)
+              <input id="clipHook" maxlength="80" value="${esc(c.hook || "")}" placeholder="no hook"></label>
+            <div class="boxbtns"><button class="ghostbtn" id="clipHookSave">Use this hook</button>
+              <button class="ghostbtn" id="clipHookNew" title="Ask Gemini for a new hook and make the reel again">✨ New hook</button></div>
+            ${c.source ? `<p class="muted small">Source: ${esc(c.source)}</p>` : ""}
             <p class="muted small">${layoutNote}</p>
             <button class="ghostbtn" id="clipBox">${face ? "Change" : "Draw"} the face-cam box</button>
             <p class="muted small">Saved in <code>data/clips/${esc(v.vid)}/${cname(s)}.mp4</code></p>
@@ -410,6 +415,8 @@ export function createSpikeView(opts) {
             <button class="ghostbtn" id="boxNone">No face cam</button><button class="ghostbtn" id="boxCancel">Cancel</button></div>
         </div>`;
       $("clipRemake").onclick = () => makeClip(s);
+      $("clipHookSave").onclick = () => makeClip(s, { hook: $("clipHook").value.trim() });
+      $("clipHookNew").onclick = () => makeClip(s, { new_hook: 1 });
       $("clipBox").onclick = () => boxEditor(s, face);
     }
   }
@@ -521,8 +528,9 @@ export function createSpikeView(opts) {
       out += `<line class="cursor" x1="${x(v.selected + step / 2)}" x2="${x(v.selected + step / 2)}" y1="${padT}" y2="${y(0)}"/>`;
     }
     if (opts.extraMarks) out += opts.extraMarks({ x, y, t0, t1: t0 + total, padT, H, padB });
-    for (let i = 0; i <= 6; i++) {
-      const t = t0 + (total * i) / 6;
+    const nLabels = Math.max(2, Math.min(6, Math.floor((W - PAD_L) / 80)));   // fewer time labels on a phone
+    for (let i = 0; i <= nLabels; i++) {
+      const t = t0 + (total * i) / nLabels;
       out += `<text class="axis" x="${Math.min(Math.max(x(t), PAD_L + 20), W - 24)}" y="${H - 5}" text-anchor="middle">${clock(t)}</text>`;
     }
     out += `<rect class="hit" x="${PAD_L}" y="0" width="${W - PAD_L}" height="${H - padB}"/>`;
@@ -535,7 +543,69 @@ export function createSpikeView(opts) {
     if (frac < 0 || frac > 1 || !buckets.length) return null;
     return buckets[Math.min(buckets.length - 1, Math.floor(frac * buckets.length))];
   }
+  // ---- Carousel (when the page allows it): one finger / mouse drag or sideways scroll moves through time,
+  // two-finger pinch or ctrl + scroll (trackpad pinch) zooms: bigger bars = less time on screen.
+  // opts.pan(seconds)      -> move the shown range back (+) or forward (-) by that many seconds
+  // opts.zoom(factor, frac) -> make bars `factor` times wider, around the point at `frac` (0..1) of the chart
+  let drag = null, dragged = false;
+  const pts = new Map();   // pointers down on the chart
+  let pinch = null;
+  const secPerPx = () => { const [a, b] = opts.range(); return Math.max(1, b - a) / Math.max(1, $("svg").clientWidth - PAD_L); };
+  const fracAt = (clientX) => { const r = $("svg").getBoundingClientRect(); return Math.min(1, Math.max(0, (clientX - r.left - PAD_L) / (r.width - PAD_L))); };
+  if (opts.pan) {
+    const svg = $("svg");
+    svg.classList.add("pannable");
+    const startPinch = () => {
+      const [a, b] = [...pts.values()];
+      pinch = { d: Math.abs(a.x - b.x) || 1 };
+    };
+    svg.addEventListener("pointerdown", (e) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
+      pts.set(e.pointerId, { x: e.clientX });
+      if (pts.size === 2) { startPinch(); drag = null; dragged = true; $("tip").hidden = true; return; }
+      drag = { x: e.clientX, id: e.pointerId }; dragged = false;
+    });
+    svg.addEventListener("pointermove", (e) => {
+      if (!pts.has(e.pointerId)) return;
+      pts.get(e.pointerId).x = e.clientX;
+      if (pinch && pts.size === 2) {
+        const [a, b] = [...pts.values()], d = Math.abs(a.x - b.x) || 1;
+        if (Math.abs(d / pinch.d - 1) > 0.02) { opts.zoom(d / pinch.d, fracAt((a.x + b.x) / 2)); pinch.d = d; }
+        return;
+      }
+      if (!drag || e.pointerId !== drag.id) return;
+      const dx = e.clientX - drag.x;
+      if (!dragged && Math.abs(dx) < 6) return;
+      if (!dragged) { dragged = true; svg.setPointerCapture(e.pointerId); svg.classList.add("dragging"); $("tip").hidden = true; }
+      drag.x = e.clientX;
+      opts.pan(dx * secPerPx());
+    });
+    const end = (e) => {
+      pts.delete(e.pointerId);
+      if (pts.size < 2) pinch = null;
+      if (drag && e.pointerId === drag.id) { drag = null; svg.classList.remove("dragging"); }
+    };
+    svg.addEventListener("pointerup", end);
+    svg.addEventListener("pointercancel", end);
+    svg.addEventListener("wheel", (e) => {
+      if (e.ctrlKey || e.metaKey) {   // trackpad pinch (and ctrl/⌘ + mouse wheel) = zoom
+        e.preventDefault(); $("tip").hidden = true;
+        opts.zoom(Math.exp(-e.deltaY * 0.01), fracAt(e.clientX));
+        return;
+      }
+      const dx = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.shiftKey ? e.deltaY : 0;
+      if (!dx) return;
+      e.preventDefault(); $("tip").hidden = true;
+      opts.pan(-dx * secPerPx());
+    }, { passive: false });
+    // Safari on a Mac sends trackpad pinch as gesture events
+    let gScale = 1;
+    svg.addEventListener("gesturestart", (e) => { e.preventDefault(); gScale = 1; });
+    svg.addEventListener("gesturechange", (e) => { e.preventDefault(); opts.zoom(e.scale / gScale, fracAt(e.clientX)); gScale = e.scale; });
+  }
+
   $("svg").addEventListener("mousemove", (e) => {
+    if (drag && dragged) return;
     const b = bucketAt(e), tip = $("tip");
     if (!b) { tip.hidden = true; return; }
     const box = $("chart").getBoundingClientRect();
@@ -546,7 +616,10 @@ export function createSpikeView(opts) {
     tip.hidden = false;
   });
   $("svg").addEventListener("mouseleave", () => ($("tip").hidden = true));
-  $("svg").addEventListener("click", (e) => { const b = bucketAt(e); if (b) opts.seek(b.t0); });
+  $("svg").addEventListener("click", (e) => {
+    if (dragged) { dragged = false; return; }   // the end of a swipe is not a click
+    const b = bucketAt(e); if (b) opts.seek(b.t0);
+  });
   window.addEventListener("resize", () => v.drawChart());
   return v;
 }

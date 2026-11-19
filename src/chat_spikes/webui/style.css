@@ -383,3 +383,16 @@ code { font-size: 12px; background: var(--bg); padding: 1px 5px; border-radius: 
 .mnode .nbar { display: block; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden; }
 .mnode .nbar i { display: block; height: 100%; background: var(--accent); }
 .mlink { align-self: center; width: 10px; height: 2px; background: var(--border); flex: 0 0 10px; }
+
+/* Live chart carousel */
+.chart svg.pannable { touch-action: pan-y; cursor: grab; user-select: none; -webkit-user-select: none; }
+.chart svg.pannable .hit { cursor: grab; }
+.chart svg.dragging, .chart svg.dragging .hit { cursor: grabbing; }
+.pager { display: inline-flex; align-items: center; gap: 4px; }
+.pager[hidden] { display: none; }
+.pager button { min-width: 28px; padding: 2px 9px; border-radius: 8px; }
+.pager button:disabled { opacity: .35; cursor: default; }
+.pager .live-btn.on { color: var(--spike); }
+.pager .pager-sep { width: 1px; align-self: stretch; background: var(--border); margin: 2px 4px; }
+.hooklbl { display: grid; gap: 4px; margin-top: 10px; }
+.hooklbl input { font: inherit; padding: 7px 10px; border: 1px solid var(--border); border-radius: 10px; background: transparent; color: var(--text); }

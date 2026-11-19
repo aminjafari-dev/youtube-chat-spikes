@@ -5,13 +5,15 @@ import { $, clock, createPlayer, createSpikeView, esc, mountParts, setStatus, st
 mountParts();
 const form = $("form"), btn = $("btn");
 const LIVE_CHAT_MAX = 300;
-const SPANS = [[600, "10 min"], [1800, "30 min"], [7200, "2 h"], [0, "All"]];
 
 let es = null, vid = null, shownVid = null, info = null;
 let stats = null, statsAt = 0, running = false, finished = false;
 let known = new Set();          // moments already seen (to spot new ones)
 let chatTab = "live", unseen = 0;
-let span = +(store.get("liveSpan") ?? 1800);
+// Chart zoom: how wide one bar is on screen. Zoom in = wider bars, less time; zoom out = thinner bars, more time.
+const BAR_MAX = 48;
+let barPx = +(store.get("liveBarPx") ?? 6) || 6;
+let viewEnd = null;             // chart carousel: null = follows live; else the stream time at the chart's right edge
 const alerts = { sound: store.get("liveSound") === "1", notify: store.get("liveNotify") === "1" };
 
 const player = createPlayer($("player"), { onInfo: showPlayerPos });
@@ -22,10 +24,16 @@ const lastWindowEnd = () => (view.windows.length ? view.windows[view.windows.len
 
 const view = createSpikeView({
   range: () => {
-    const now = Math.max(liveNow(), lastWindowEnd() ?? 0);
-    const first = view.windows.length ? view.windows[0][0] : now - 60;
-    return [Math.floor(span ? Math.max(first, now - span) : first), now];
+    const now = nowEdge(), first = firstTime(), span = spanNow();
+    if (viewEnd !== null) {
+      const step = view.rules.window || 10;
+      const t0 = Math.floor(Math.max(first, viewEnd - span) / step) * step;  // whole windows, so bars don't wobble
+      return [t0, t0 + span];
+    }
+    return [Math.max(first, now - span), now];
   },
+  pan: (sec) => panChart(sec),
+  zoom: (factor, frac) => zoomChart(factor, frac),
   seek: (t) => seekStream(t),
   aiMode: "chat",
   pollClips: true,   // reels of new moments are made on their own (auto reels)
@@ -82,20 +90,90 @@ function showPlayerPos(p) {
 $("goLive").addEventListener("click", goLive);
 
 // ---- Extra controls in the shared cards ----
-$("chartTools").innerHTML = `<div class="seg" role="group" aria-label="Chart range">${SPANS.map(([s, l]) =>
-  `<button type="button" data-span="${s}" class="${s === span ? "on" : ""}">${l}</button>`).join("")}</div>`;
+$("chartTools").innerHTML = `<div class="pager" id="pager">
+    <button type="button" class="ghostbtn" data-zoom="out" title="Zoom out: thinner bars, more time (or pinch / ctrl + scroll on the chart)" aria-label="Zoom out">−</button>
+    <button type="button" class="ghostbtn" data-zoom="in" title="Zoom in: bigger bars, less time (or pinch / ctrl + scroll on the chart)" aria-label="Zoom in">+</button>
+    <span class="pager-sep"></span>
+    <button type="button" class="ghostbtn" data-page="-1" title="Earlier (or swipe right on the chart)" aria-label="Earlier">‹</button>
+    <button type="button" class="ghostbtn" data-page="1" title="Later (or swipe left on the chart)" aria-label="Later">›</button>
+    <button type="button" class="ghostbtn live-btn" data-page="live" title="Back to now">Live ⇥</button>
+  </div>`;
 $("chartTools").addEventListener("click", (e) => {
-  const b = e.target.closest("[data-span]");
-  if (!b) return;
-  span = +b.dataset.span; store.set("liveSpan", span);
-  $("chartTools").querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
-  view.drawChart();
+  const z = e.target.closest("[data-zoom]");
+  if (z) { zoomChart(z.dataset.zoom === "in" ? 1.6 : 1 / 1.6, viewEnd === null ? 1 : 0.5); return; }
+  const p = e.target.closest("[data-page]");
+  if (p) p.dataset.page === "live" ? slideTo(null) : slideTo(chartEnd() + +p.dataset.page * spanNow() * 0.9);
+});
+
+// ---- Chart carousel: zoom (pinch / ctrl+scroll / − +) sets bar size; swipe / drag / ‹ › move through the stream ----
+const nowEdge = () => Math.max(liveNow(), lastWindowEnd() ?? 0);
+const firstTime = () => (view.windows.length ? view.windows[0][0] : nowEdge() - 60);
+const chartEnd = () => viewEnd ?? nowEdge();
+const plotW = () => Math.max(100, ($("svg").clientWidth || 600) - 34);   // 34 = the chart's left axis
+const step = () => view.rules.window || 10;
+const dataSpan = () => Math.max(step(), nowEdge() - firstTime());
+const barMin = () => Math.min(BAR_MAX, (plotW() * step()) / dataSpan());  // zoomed all the way out = whole stream fits
+const spanNow = () => Math.min(dataSpan(), (plotW() / Math.max(barMin(), barPx)) * step());
+function clampEnd(t) {
+  const now = nowEdge();
+  const t2 = Math.min(now, Math.max(firstTime() + spanNow(), t));
+  return t2 >= now - step() ? null : t2;   // close enough to now = follow live again
+}
+function redraw() { view.drawChart(); showPager(); }
+function panChart(sec) {
+  anim && cancelAnimationFrame(anim); anim = null;
+  viewEnd = clampEnd(chartEnd() - sec);
+  redraw();
+}
+// Zoom around a point of the chart (frac: 0 = left edge, 1 = right edge), so what's under the fingers stays put.
+function zoomChart(factor, frac = 0.5) {
+  anim && cancelAnimationFrame(anim); anim = null;
+  const oldSpan = spanNow(), end = chartEnd();
+  const at = end - (1 - frac) * oldSpan;
+  barPx = Math.min(BAR_MAX, Math.max(barMin(), Math.max(barMin(), barPx) * factor));
+  store.set("liveBarPx", barPx.toFixed(2));
+  if (viewEnd !== null || frac < 0.95) viewEnd = clampEnd(at + (1 - frac) * spanNow());
+  redraw();
+}
+let anim = null;
+function slideTo(target) {
+  anim && cancelAnimationFrame(anim);
+  const from = chartEnd(), to = target === null ? nowEdge() : (clampEnd(target) ?? nowEdge());
+  if (document.hidden) { viewEnd = clampEnd(to); redraw(); return; }  // no frames in a hidden tab
+  const t0 = performance.now(), dur = 280;
+  const stepAnim = (t) => {
+    const k = Math.min(1, (t - t0) / dur), e = 1 - (1 - k) ** 3;
+    viewEnd = k < 1 ? from + (to - from) * e : clampEnd(to);
+    redraw();
+    anim = k < 1 ? requestAnimationFrame(stepAnim) : null;
+  };
+  anim = requestAnimationFrame(stepAnim);
+}
+function showPager() {
+  const pager = $("pager"), has = view.windows.length > 0;
+  pager.hidden = !has;
+  if (!has) return;
+  const end = chartEnd(), span = spanNow(), all = span >= dataSpan() - 1;
+  const q = (sel) => pager.querySelector(sel);
+  q('[data-zoom="in"]').disabled = barPx >= BAR_MAX;
+  q('[data-zoom="out"]').disabled = all;
+  q('[data-page="-1"]').disabled = all || end - span <= firstTime() + 1;
+  q('[data-page="1"]').disabled = viewEnd === null;
+  q(".live-btn").classList.toggle("on", viewEnd === null);
+  q(".live-btn").disabled = viewEnd === null;
+}
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest("input, textarea, select") || !$("chart").matches(":hover")) return;
+  const k = { ArrowLeft: () => slideTo(chartEnd() - spanNow() * 0.9), ArrowRight: () => slideTo(chartEnd() + spanNow() * 0.9),
+    "+": () => zoomChart(1.6, viewEnd === null ? 1 : 0.5), "=": () => zoomChart(1.6, viewEnd === null ? 1 : 0.5),
+    "-": () => zoomChart(1 / 1.6, viewEnd === null ? 1 : 0.5) }[e.key];
+  if (k) { e.preventDefault(); k(); }
 });
 
 $("momentTools").innerHTML = `<div class="alerts small">
   <label><input type="checkbox" id="aSound" ${alerts.sound ? "checked" : ""}> 🔔 Sound on a new moment</label>
   <label><input type="checkbox" id="aNotify" ${alerts.notify ? "checked" : ""}> Notification (when this tab is hidden)</label>
-  <label title="A 1080×1920 reel (face cam on top, game below) of every new moment, made on your Mac"><input type="checkbox" id="aClip" checked> 🎬 Make a reel of every new moment</label></div>`;
+  <label title="A vertical reel (face cam on top, game below, a hook between them) of every new moment, made on your Mac"><input type="checkbox" id="aClip" checked> 🎬 Make a reel of every new moment</label></div>`;
 $("aClip").addEventListener("change", (e) => {
   if (vid) fetch(`/api/clip/auto?v=${vid}&on=${e.target.checked ? 1 : 0}`).then((r) => r.json()).then((d) => view.loadClips(d));
 });
@@ -304,6 +382,7 @@ function handle({ type, data }) {
   updateTiles();
   showState();
   view.drawChart();
+  showPager();
 }
 
 form.addEventListener("submit", async (e) => {
@@ -323,7 +402,7 @@ form.addEventListener("submit", async (e) => {
 });
 
 // Keep the clock, tiles and chart moving between updates.
-setInterval(() => { if (running) { updateTiles(); showState(); view.drawChart(); } }, 1000);
+setInterval(() => { if (running) { updateTiles(); showState(); view.drawChart(); showPager(); } }, 1000);
 
 // Reload / come back: reconnect to the watch from the address (?v=), or to whatever is being watched now.
 const fromUrl = new URLSearchParams(location.search).get("v");

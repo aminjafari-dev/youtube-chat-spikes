@@ -136,16 +136,16 @@ If the stream time looks wrong, open the live page once while the stream is live
 exact 0:00). Live lines are read in `live.py` → `parse_live_line()`: if YouTube changes the message format,
 that is the one place to fix.
 
-## Reels: a vertical clip of a moment (1080×1920)
+## Reels: a vertical clip of a moment (9:16, with a hook)
 
 Each moment can become a reel for Shorts / Reels / TikTok:
 
 ```
 ┌──────────────┐
-│  face cam    │  top 672 px: the streamer's face cam, zoomed to the full width
-├──────────────┤
+│  face cam    │  top 35%: the streamer's face cam, zoomed to the full width
+├─── HOOK ─────┤  a caption with emoji on the line between them, first 5 s only (Gemini)
 │              │
-│  middle of   │  bottom 1248 px: the middle of the stream screen (the game)
+│  middle of   │  bottom 65%: the middle of the stream screen (the game)
 │  the screen  │
 │              │
 └──────────────┘
@@ -157,12 +157,24 @@ Each moment can become a reel for Shorts / Reels / TikTok:
 - The moment list shows 🎬 when its reel is ready (🎬… while it is being made). The reel card plays it and has
   **Download**, **Make again** and the face-cam box.
 - Saved in `data/clips/<video>/<peak>.mp4` (plus a `.jpg` frame and a `.json` with the times and the layout).
-- Each reel is a **Reel** job with 6 connected nodes: In line → Check the stream → Wait for the video (live only) →
-  Download the piece → Make the reel → Save. Download and Make the reel show a progress bar. The same nodes show
+- Each reel is a **Reel** job with 7 connected nodes: In line → Check the stream → Wait for the video (live only) →
+  Download the piece → Write the hook → Make the reel → Save. Download and Make the reel show a progress bar. The same nodes show
   inside the reel card, with **Open this job in Activity** and **Cancel**. One reel is made at a time.
+- **The hook**: Gemini reads what is said in the clip (finished streams: YouTube's captions) and the chat, and
+  writes a caption of at most 10 words plus 1-2 emoji (e.g. "Lacy shows off how BIG the GTA VI Map is 😳🔥")
+  that tells a stranger what the clip is and why to keep watching (based on what really happens). It is drawn
+  as bold near-black San Francisco text with Apple colour emoji on a white rounded box with a soft shadow (made
+  with Pillow, since this ffmpeg has no text filter), shows for the first 5 s and fades out (`HOOK_SECONDS` in
+  `clips.py`). Saved in `data/processed/why/<video>/<peak>.hook.json`, so remakes reuse it. On the reel card you can
+  type your own hook (**Use this hook**) or ask for **✨ New hook**. If Gemini fails, the reel is made without one.
 - **Best quality**: yt-dlp picks the highest resolution, then frame rate, then bitrate (`-S res,fps,br`), with no
-  size limit. The reel keeps the source frame rate (60 fps) and is encoded with x264 `-preset slow -crf 16`.
-  YouTube's live feed tops out at 1080p60. The Download node shows the quality it got.
+  size limit. The reel is never scaled down: 1080×1920 from 1080p, 1440×2560 from 1440p, 2160×3840 from 4K (the
+  game part is always at least as tall as the source). It keeps the source frame rate (60 fps), is encoded with
+  x264 `-preset slow -crf 10` (visually lossless), and the sound is copied as is when it is AAC.
+- **Why live reels are 1080p even when YouTube's player shows 1440p**: while a stream is live, YouTube gives
+  1440p only to its own web player (a streaming protocol and tokens yt-dlp can't use). Every client yt-dlp can use
+  gets at most 1080p60. After the stream ends, the recording usually has 1440p: **Make again** then downloads it
+  from the recording in full quality. The Download node shows the quality it got.
 - **Audio sync (live)**: YouTube's live video and audio lists have different lengths, so the downloaded video and
   audio can start a few seconds apart (seen: 6 s). The app reads each one's start time from ffmpeg's log and cuts
   each one at the same stream moment.

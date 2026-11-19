@@ -1,7 +1,12 @@
-"""Clips: turn a chat spike into a vertical reel (1080×1920) ready for Shorts / Reels / TikTok.
+"""Clips: turn a chat spike into a vertical reel (9:16) ready for Shorts / Reels / TikTok.
 
-    top    (1080×672):  the streamer's face cam, zoomed to the full width
-    bottom (1080×1248): the middle of the stream screen (the game)
+    top    (35%):  the streamer's face cam, zoomed to the full width
+    bottom (65%):  the middle of the stream screen (the game)
+    on the line between them, for the first 5 s: a caption with emoji in a white box, written by Gemini
+               from the transcript and chat
+
+The reel is never smaller than what it shows: 1080×1920 from a 1080p source, 1440×2560 from 1440p,
+2160×3840 from 4K, so no part of the source is ever scaled down. Encoding is x264 CRF 10 (visually lossless).
 
 If a channel has no face-cam box yet, the whole reel is the middle of the screen.
 The face-cam box is saved per channel in data/clip_layouts.json (as parts of the frame, 0..1),
@@ -43,11 +48,14 @@ from .report import hms
 
 CLIPS = ROOT / "data" / "clips"
 LAYOUTS = ROOT / "data" / "clip_layouts.json"
-W, H, TOP_H = 1080, 1920, 672           # reel size and the face-cam part on top
+TOP_PART = 672 / 1920                    # the face-cam part on top (of the reel's height)
+CRF = 10                                 # x264 quality: 0 = lossless, ~17 = "looks the same"; 10 = no visible loss
 LIVE_BACK_MAX = 840                      # the live playlist lists ~15 min: older moments are fetched piece by piece
 LIVE_READY = 8                           # live: start this many seconds after the clip's end reached YouTube
 # Best quality first: the highest resolution, then frame rate, then bitrate (= most detail). No size limit:
-# a 1440p/4K stream is downloaded in 1440p/4K. (A live stream's feed tops out at 1080p60 on YouTube.)
+# a 1440p/4K recording is downloaded in 1440p/4K. While a stream is LIVE, YouTube gives yt-dlp at most
+# 1080p60 (its own player gets 1440p over a protocol yt-dlp can't use), so remake the reel after the stream
+# ends to get the full quality.
 BEST = "res,fps,br,abr"
 LIVE_MARGIN = 12                         # live: start this much earlier on the feed (in case it runs behind)
 
@@ -63,9 +71,13 @@ STEPS = [
      "YouTube), and picks the face-cam box for this stream."),
     ("wait", "Wait for the video", "Live only: waits until the end of the clip is on YouTube's live feed "
      "(usually a few seconds after the spike is found)."),
-    ("download", "Download the piece", "yt-dlp downloads only these seconds of the video (up to 1080p). "
+    ("download", "Download the piece", "yt-dlp downloads only these seconds of the video in the best quality "
+     "YouTube gives it (live: up to 1080p60; finished: up to 4K). "
      "From a live stream this runs at about real-time speed."),
-    ("render", "Make the reel", "ffmpeg on your Mac: face cam on top, the middle of the screen below, 1080×1920."),
+    ("hook", "Write the hook", "Gemini reads what is said (finished streams) and the chat, and writes a caption "
+     "(with emoji) for the middle of the reel's first 5 s. Asked once per moment. If it fails, the reel has no hook."),
+    ("render", "Make the reel", "ffmpeg on your Mac: face cam on top, the middle of the screen below, the hook "
+     "between them for 5 s. Never scaled down; x264 CRF 10 (visually lossless)."),
     ("save", "Save", "Writes the reel (.mp4), a frame of the full screen (.jpg) and its info (.json) to "
      "data/clips/<video>/ and deletes the temporary files."),
 ]
@@ -111,21 +123,48 @@ def save_layout(channel: str, vid: str, face: list[float] | None, game: list[flo
     return lay
 
 
-def _filter(face: list[float] | None, game: list[float] | None = None) -> str:
+def reel_size(src_height: int) -> tuple[int, int, int]:
+    """(width, height, face-cam part on top) of the reel. The game part (65% of the height) is always at
+    least as tall as the whole source, so nothing is ever scaled down: only up, or not at all."""
+    w = 1080 if src_height <= 1080 else 1440 if src_height <= 1440 else 2160
+    h = w * 16 // 9
+    return w, h, round(h * TOP_PART / 2) * 2
+
+
+# Lanczos, with exact rounding and full-resolution colour (no softening of the colour edges)
+SCALE = "flags=lanczos+accurate_rnd+full_chroma_int"
+
+
+def _filter(face: list[float] | None, game: list[float] | None, size: tuple[int, int, int],
+            hook: tuple[int, int] | None = None) -> str:
+    """hook: (input number of the hook image, its height): put on the line between face cam and game
+    for the first HOOK_SECONDS of the reel."""
+    W, H, TOP_H = size
     even = lambda e: f"trunc(({e})/2)*2"
     g = ""
     if game:
         gx, gy, gw, gh = game
         g = f"crop={even(f'iw*{gw}')}:{even(f'ih*{gh}')}:iw*{gx}:ih*{gy},"
+    out = "[v]" if not hook else "[base]"
     if not face:
-        return f"[0:v]{g}crop={even('ih*9/16')}:ih,scale={W}:{H}:flags=lanczos,setsar=1[v]"
-    x, y, w, h = face
-    bot = H - TOP_H
-    return (f"[0:v]split=2[a][b];"
-            f"[a]crop={even(f'iw*{w}')}:{even(f'ih*{h}')}:iw*{x}:ih*{y},"
-            f"scale={W}:{TOP_H}:force_original_aspect_ratio=increase:flags=lanczos,crop={W}:{TOP_H},setsar=1[top];"
-            f"[b]{g}crop={even(f'ih*{W}/{bot}')}:ih,scale={W}:{bot}:flags=lanczos,setsar=1[bot];"
-            f"[top][bot]vstack[v]")
+        f = f"[0:v]{g}crop={even('ih*9/16')}:ih,scale={W}:{H}:{SCALE},setsar=1{out}"
+        line = TOP_H  # no face cam: still about a third down, over the game
+    else:
+        x, y, w, h = face
+        bot = H - TOP_H
+        f = (f"[0:v]split=2[a][b];"
+             f"[a]crop={even(f'iw*{w}')}:{even(f'ih*{h}')}:iw*{x}:ih*{y},"
+             f"scale={W}:{TOP_H}:force_original_aspect_ratio=increase:{SCALE},crop={W}:{TOP_H},setsar=1[top];"
+             f"[b]{g}crop={even(f'ih*{W}/{bot}')}:ih,scale={W}:{bot}:{SCALE},setsar=1[bot];"
+             f"[top][bot]vstack{out}")
+        line = TOP_H
+    if hook:
+        n, hh = hook
+        # shown from the first frame for HOOK_SECONDS, fading out over its last HOOK_FADE seconds
+        f += (f";[{n}:v]format=rgba,trim=duration={HOOK_SECONDS},"
+              f"fade=t=out:st={HOOK_SECONDS - HOOK_FADE}:d={HOOK_FADE}:alpha=1[hk];"
+              f"[base][hk]overlay=0:{line - hh // 2}:format=auto:eof_action=pass[v]")
+    return f
 
 
 # ---------- files ----------
@@ -397,19 +436,181 @@ def _download_pieces(vid: str, a: float, b: float, work: Path, on_time=None, sto
     return src, max(0.0, a - v0), max(0.0, a - a0)
 
 
+def _probe(src: Path, stream: str = "v:0") -> dict:
+    try:
+        return json.loads(subprocess.run(["ffprobe", "-v", "error", "-select_streams", stream, "-show_entries",
+                                          "stream=width,height,avg_frame_rate,codec_name", "-of", "json", str(src)],
+                                         capture_output=True, text=True, timeout=20).stdout)["streams"][0]
+    except (ValueError, KeyError, IndexError, subprocess.SubprocessError):
+        return {}
+
+
 def _quality(src: Path, log: str) -> str:
     """e.g. "1920×1080 · 60 fps · avc1 + mp4a (YouTube formats 312+140)"."""
     fmt = re.search(r"Downloading 1 format\(s\): (\S+)", log)
     try:
-        info = json.loads(subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-                                          "stream=width,height,avg_frame_rate,codec_name", "-of", "json", str(src)],
-                                         capture_output=True, text=True, timeout=20).stdout)["streams"][0]
+        info = _probe(src)
         n, d = info["avg_frame_rate"].split("/")
         fps = round(int(n) / int(d)) if int(d) else 0
         q = f"{info['width']}×{info['height']} · {fps} fps · {info['codec_name']}"
-    except (ValueError, KeyError, IndexError, subprocess.SubprocessError, ZeroDivisionError):
+    except (ValueError, KeyError, ZeroDivisionError):
         q = "unknown"
     return q + (f" (YouTube formats {fmt.group(1)})" if fmt else "")
+
+
+# ---------- the hook ----------
+
+FONT = "/System/Library/Fonts/SFNS.ttf"                    # San Francisco (variable: set to Bold)
+EMOJI_FONT = "/System/Library/Fonts/Apple Color Emoji.ttc"  # bitmap colour emoji, drawn at 160 px and scaled
+HOOK_SECONDS = 5.0                                          # the hook shows at the start, then fades out
+HOOK_FADE = 0.35
+BOX = (255, 255, 255, 240)                                  # an almost solid white box…
+INK = (17, 17, 17, 255)                                     # …with near-black text: reads on any game / cam
+
+
+def _is_emoji(ch: str) -> bool:
+    o = ord(ch)
+    return (0x1F000 <= o <= 0x1FAFF or 0x2600 <= o <= 0x27BF or 0x2300 <= o <= 0x23FF
+            or 0x2B00 <= o <= 0x2BFF or o in (0x200D, 0xFE0F, 0x203C, 0x2049))
+
+
+def _runs(text: str) -> list[tuple[bool, str]]:
+    """The text cut into (is_emoji, piece) runs. Joiners / variation selectors are dropped (no raqm)."""
+    out: list[tuple[bool, str]] = []
+    for ch in text:
+        e = _is_emoji(ch)
+        if ch in "‍️":
+            continue
+        if out and out[-1][0] == e:
+            out[-1] = (e, out[-1][1] + ch)
+        else:
+            out.append((e, ch))
+    return out
+
+
+def _hook_image(text: str, width: int, out: Path) -> int:
+    """The hook as a transparent PNG as wide as the reel: bold dark text with colour emoji on a white
+    rounded box (the TikTok caption look), wrapped to at most 3 centred lines. Returns its height."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    def font(size: int):
+        f = ImageFont.truetype(FONT, size)
+        try:
+            f.set_variation_by_name("Bold")
+        except (OSError, ValueError):
+            pass
+        return f
+
+    emo_src = ImageFont.truetype(EMOJI_FONT, 160)
+    max_w = width * 0.84
+    pad_x, size = 0, round(width * 0.058)
+
+    def length(f, s: str) -> float:  # a line's width: text by the font, each emoji 1.2 em
+        return sum((len(p) * f.size * 1.2) if e else f.getlength(p) for e, p in _runs(s))
+
+    def wrap(f) -> list[str]:
+        lines: list[str] = []
+        for w in text.split():
+            if lines and length(f, lines[-1] + " " + w) <= max_w:
+                lines[-1] += " " + w
+            else:
+                lines.append(w)
+        return lines
+
+    f = font(size)
+    lines = wrap(f)
+    while (len(lines) > 3 or max(length(f, l) for l in lines) > max_w) and size > 20:
+        size -= 2
+        f = font(size)
+        lines = wrap(f)
+    if len(lines) == 2:  # balance two lines (no long line over a one-word line)
+        words = text.split()
+        best = min(range(1, len(words)), key=lambda i: abs(length(f, " ".join(words[:i])) - length(f, " ".join(words[i:]))))
+        cand = [" ".join(words[:best]), " ".join(words[best:])]
+        if max(length(f, l) for l in cand) <= max_w:
+            lines = cand
+
+    line_h = round(size * 1.28)
+    pad_x, pad_y = round(size * 0.6), round(size * 0.42)
+    box_w = round(max(length(f, l) for l in lines)) + pad_x * 2
+    box_h = line_h * len(lines) + pad_y * 2
+    shadow = round(size * 0.25)
+    h = box_h + shadow * 2
+    h += h % 2
+    img = Image.new("RGBA", (width, h), (0, 0, 0, 0))
+    # soft shadow under the box, so it lifts off a white face cam too
+    from PIL import ImageFilter
+    sh = Image.new("RGBA", (width, h), (0, 0, 0, 0))
+    x0, y0 = (width - box_w) // 2, shadow
+    ImageDraw.Draw(sh).rounded_rectangle((x0, y0 + shadow // 3, x0 + box_w, y0 + box_h + shadow // 3),
+                                         radius=round(size * 0.45), fill=(0, 0, 0, 90))
+    img.alpha_composite(sh.filter(ImageFilter.GaussianBlur(shadow / 2)))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((x0, y0, x0 + box_w, y0 + box_h), radius=round(size * 0.45), fill=BOX)
+    asc = f.getmetrics()[0]
+    y = y0 + pad_y
+    for l in lines:
+        x = (width - length(f, l)) / 2
+        base = y + (line_h - size) / 2 + size * 0.82  # text baseline in this line
+        for e, piece in _runs(l):
+            if not e:
+                d.text((x, base - asc), piece, font=f, fill=INK)
+                x += f.getlength(piece)
+                continue
+            for ch in piece:
+                g = Image.new("RGBA", (200, 200), (0, 0, 0, 0))
+                ImageDraw.Draw(g).text((0, 0), ch, font=emo_src, embedded_color=True)
+                bb = g.getbbox()
+                if bb:
+                    g = g.crop(bb)
+                    s = size * 1.05 / max(g.size)
+                    g = g.resize((max(1, round(g.width * s)), max(1, round(g.height * s))), Image.LANCZOS)
+                    img.alpha_composite(g, (round(x + size * 0.08), round(base - size * 0.9)))
+                x += size * 1.2
+        y += line_h
+    img.save(out)
+    return h
+
+
+class _SubStep:
+    """Gemini's own steps (prompt, queue, ask) shown as lines of the reel's "hook" step."""
+
+    def __init__(self, st, key: str):
+        self.st, self.key = st, key
+
+    def begin(self, text: str = ""):
+        if text:
+            self.st.detail(text)
+        return self
+
+    def detail(self, text: str, progress=None) -> None:
+        self.st.detail(text)
+
+    def log(self, msg: str) -> None:
+        self.st.log(msg)
+
+    def set(self, **kv) -> None:
+        pass
+
+    def done(self, text=None) -> None:
+        if text:
+            self.st.log(f"{self.key}: {text}")
+
+    fail = skip = done
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a) -> bool:
+        return False
+
+
+class _Sub:
+    def __init__(self, st):
+        self.st = st
+
+    def step(self, key: str) -> _SubStep:
+        return _SubStep(self.st, key)
 
 
 # ---------- the queue ----------
@@ -436,9 +637,19 @@ def jobs(vid: str) -> dict[str, dict]:
     return out
 
 
-def make(vid: str, moment: dict, channel: str, title: str = "", auto: bool = False) -> dict:
-    """Queue a clip of a moment (again, if it was made before). auto=True: skipped when it already exists."""
+def make(vid: str, moment: dict, channel: str, title: str = "", auto: bool = False,
+         hook: str | None = None, new_hook: bool = False) -> dict:
+    """Queue a clip of a moment (again, if it was made before). auto=True: skipped when it already exists.
+
+    hook: typed on the page ("" = no hook), kept for the next remakes. new_hook: ask Gemini for a new one."""
+    from . import gemini
     name = _name(moment["peak"])
+    hp = gemini.hook_path(vid, moment["peak"])
+    if hook is not None:
+        hp.parent.mkdir(parents=True, exist_ok=True)
+        hp.write_text(json.dumps({"hook": gemini.cut_hook(hook), "by_hand": True}, ensure_ascii=False))
+    elif new_hook:
+        hp.unlink(missing_ok=True)
     k = _key(vid, moment["peak"])
     with _lock:
         j = _jobs.get(k)
@@ -574,11 +785,29 @@ def _make(j: dict) -> None:
                    video_starts_at=f"{offset:.2f} s into the file", audio_starts_at=f"{a_offset:.2f} s into the file")
             st.done(f"{quality.split(' (')[0]} · {src.stat().st_size / 1e6:.1f} MB in {time.time() - t0:.0f} s · "
                     f"audio lined up ({a_offset - offset:+.1f} s)")
+        size = reel_size(int(_probe(src).get("height") or 1080))
+        with run.step("hook") as st:
+            j["note"] = "writing the hook…"
+            from . import gemini
+            try:  # saved (or typed on the page) → used as is; else Gemini writes one
+                hook = gemini.reel_hook(vid, {"title": j["title"], "channel": j["channel"]},
+                                        {"peak": j["peak"], "clip_start": a, "clip_end": b},
+                                        status == "is_live", _Sub(st))["hook"]
+            except Exception as e:  # no key, quota, busy: the reel is still made, without a hook
+                st.log(f"no hook: {e}")
+                hook = ""
+            hook_png = work / "hook.png" if hook else None
+            if hook_png:
+                hook_h = _hook_image(hook, size[0], hook_png)
+            st.set(hook=hook or "none")
+            st.done(f"“{hook}”" if hook else "no hook (Gemini didn't answer): the reel is made without one")
         with run.step("render") as st:
             j["note"] = "making the reel…"
             st.detail("face cam on top + middle of the screen" if lay["face"] else "middle of the screen only", 0)
             tmp = work / "out.mp4"
             t0 = time.time()
+            # Keep the sound as it is when it is already AAC (no second lossy encode), else AAC 320k.
+            audio = ["-c:a", "copy"] if _probe(src, "a:0").get("codec_name") == "aac" else ["-c:a", "aac", "-b:a", "320k"]
 
             def enc_time(t: float) -> None:
                 j["note"] = f"making the reel… {int(t / length * 100)}%"
@@ -586,17 +815,21 @@ def _make(j: dict) -> None:
 
             # The same file twice: the video cut at its offset, the audio at its own (they can differ, live).
             rc, err = _run(["ffmpeg", "-v", "error", "-stats", "-y", "-ss", f"{offset:.3f}", "-i", str(src),
-                            "-ss", f"{a_offset:.3f}", "-i", str(src),
-                            "-t", f"{length:.2f}", "-filter_complex", _filter(lay["face"], lay["game"]),
+                            "-ss", f"{a_offset:.3f}", "-i", str(src)] +
+                           (["-loop", "1", "-i", str(hook_png)] if hook_png else []) +
+                           ["-t", f"{length:.2f}",
+                            "-filter_complex", _filter(lay["face"], lay["game"], size, (2, hook_h) if hook_png else None),
                             "-map", "[v]", "-map", "1:a?",
-                            # High quality: keep the source frame rate (60 fps), near-lossless x264.
-                            "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-profile:v", "high",
-                            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
+                            # Keep the source frame rate (60 fps); x264 CRF 10 = no visible loss.
+                            "-c:v", "libx264", "-preset", "slow", "-crf", str(CRF), "-profile:v", "high",
+                            "-pix_fmt", "yuv420p", "-color_range", "tv", "-colorspace", "bt709",
+                            "-color_primaries", "bt709", "-color_trc", "bt709", *audio,
                             "-movflags", "+faststart", str(tmp)], timeout=1800, log=work / "render.log",
                            on_time=enc_time, stop=stop)
             if rc != 0 or not tmp.exists():
                 raise ClipError("ffmpeg: " + _last_error(err))
-            st.done(f"1080×1920 · {int(length)} s · encoded in {time.time() - t0:.0f} s")
+            st.set(size=f"{size[0]}×{size[1]}", crf=CRF, audio="copied" if audio[1] == "copy" else "aac 320k")
+            st.done(f"{size[0]}×{size[1]} · {int(length)} s · encoded in {time.time() - t0:.0f} s")
         with run.step("save") as st:
             out = clip_path(vid, j["peak"])
             # A frame of the full screen, so the face-cam box can be drawn on the page.
@@ -605,7 +838,8 @@ def _make(j: dict) -> None:
             tmp.replace(out)
             out.with_suffix(".json").write_text(json.dumps({
                 "peak": j["peak"], "start": a, "end": b, "channel": j["channel"], "title": j["title"],
-                "face": lay["face"], "game": lay["game"], "made": time.time(), "size": out.stat().st_size}))
+                "face": lay["face"], "game": lay["game"], "made": time.time(), "size": out.stat().st_size,
+                "hook": hook, "width": size[0], "height": size[1], "source": quality}))
             st.set(file=str(out.relative_to(ROOT)))
             st.done(f"{out.relative_to(ROOT)} · {out.stat().st_size / 1e6:.1f} MB")
         j["state"], j["note"] = "done", ""
