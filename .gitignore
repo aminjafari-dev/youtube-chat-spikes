@@ -8,3 +8,6 @@ __pycache__/
 .venv/
 
 streams/
+.secrets/
+upload_log.json
+client_secret_*.json

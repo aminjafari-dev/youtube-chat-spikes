@@ -321,8 +321,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
     def clip_api(self, action: str, qs: dict) -> None:
-        """Reels of moments (clips.py): make one, list them, change the face-cam box, auto clips on/off."""
-        from . import clips
+        """Reels of moments (clips.py): make one, list them, change the face-cam box, find it with Gemini
+        (facecam.py), auto clips on/off."""
+        from . import clips, facecam, gemini
         from .replay import cached
 
         g = lambda k, d="": (qs.get(k) or [d])[0].strip()
@@ -347,12 +348,15 @@ class Handler(BaseHTTPRequestHandler):
                 face = box("face") if "face" in qs else old["face"]
                 # No face cam (outdoor stream...): no game box either, unless one is given.
                 clips.save_layout(channel, vid, face, box("game") if "game" in qs else old["game"] if face else None)
+            elif action == "facecam":
+                # Screenshots of the stream → Gemini → where the face cam is (takes 1-4 minutes).
+                facecam.detect(vid, channel, live=live.live_status(vid) == "is_live")
             elif action == "auto":
                 if w:
                     w.auto_clip = g("on") == "1"
             elif action != "list":
                 return self.send_error(404)
-        except (ValueError, clips.ClipError) as e:
+        except (ValueError, clips.ClipError, facecam.FaceCamError, gemini.GeminiError) as e:
             return self.send_json({"error": str(e) or "bad value"})
         self.send_json({"clips": clips.jobs(vid), "channel": channel,
                         "folder": library.rel(library.clips_dir(vid)), "layout": clips.layout_for(channel, vid),

@@ -228,6 +228,16 @@ Each moment can become a reel for Shorts / Reels / TikTok:
 Where the face cam is depends on the streamer, so the box is saved in `data/clip_layouts.json`:
 for the stream (`video:<id>`) and, when there is a face cam, for the channel (default for its next streams).
 IShowSpeed's GTA 6 layout is built in (`clips.py` → `DEFAULT_LAYOUTS`).
+
+**Found by Gemini (2026-11-21):** the first reel of a stream with no saved box first takes 6 screenshots at random
+times (yt-dlp downloads 1 s at each; finished: spread over the recording, live: over the last ~15 min) and sends
+them to Gemini in one request (`facecam.py`). Gemini says for each frame if there is a webcam overlay of the real
+streamer and its box (game characters don't count). The cam counts as found if it is in at least half of the
+frames; the box is the median of those boxes. Saved like a drawn box; the frames and the answer are kept in the
+stream's `ai/` folder (`facecam.json`, `facecam/*.jpg`). About 1–4 minutes, one request per stream. Also on the page:
+**✨ Find the face cam with AI**, or by hand: `uv run python -m chat_spikes.facecam <video id or link> [--save]`.
+If Gemini can't answer, the reel is made as before.
+
 To change it: on a reel, press **Draw / Change the face-cam box**, drag a box on the frame, **Save and make again**.
 **No face cam** (e.g. an outdoor IRL stream) makes the whole reel from the middle of the screen, for that stream only.
 An optional `game` box (only in the JSON file) cuts off black bars around the game.
@@ -243,6 +253,24 @@ An optional `game` box (only in the JSON file) cuts off black bars around the ga
 - Right after a stream ends, YouTube processes the recording for a while ("post_live") and refuses downloads
   (403). The reel then fails with a clear message: try again later from the Finished stream page.
 - Live moments older than ~14 minutes can't be cut from the live feed: make them after the stream ends.
+
+## Posting reels to six platforms (chat-publish)
+
+`chat-publish` posts every finished reel to Instagram, TikTok, X, Facebook, Pinterest and YouTube through each
+platform's official API: the file goes straight from this Mac, in full quality, with no browser.
+
+- One reel at a time, in that platform order, then a random 5–10 min pause; when nothing is left, a 1 h rest.
+- Connect each account once: `uv run chat-publish setup youtube|meta|tiktok|x|pinterest` (Meta covers Instagram and
+  Facebook). Keys and tokens are kept in `.secrets/publish.json` (git-ignored). Platforms not connected are skipped.
+- `status`, `once [--dry-run]`, `run`, `retry <platform>`, `install` / `uninstall` (a launchd service that keeps the
+  loop running in the background and starts it at login). Log: `output/publish.log`.
+- Progress per reel and platform is in `upload_log.json`. Anything that needs you goes under `needs_human`.
+- A platform that fails 3 times in a row, or loses its sign-in, is paused and the others continue. A post that was
+  interrupted mid-upload is never retried on its own, so nothing is posted twice.
+- Platform limits: YouTube keeps API uploads private until the Google project passes YouTube's audit, TikTok posts
+  privately until its app audit, X needs a paid API plan for video and allows at most 140 s, and Pinterest needs
+  Standard access (Trial apps write to the sandbox).
+- Step-by-step setup (Persian): [publish-setup-fa.md](publish-setup-fa.md).
 
 ## Why did chat explode? (free evidence + optional AI check)
 
@@ -368,6 +396,7 @@ The page shows a clear message for each case.
 |------|-----|
 | `src/chat_spikes/replay.py` | Downloads chat replay with yt-dlp, reads it while it downloads, saves a compact copy |
 | `src/chat_spikes/clips.py` | Reels: download the piece (yt-dlp), face cam on top + middle of the screen below (ffmpeg), queue, layouts |
+| `src/chat_spikes/facecam.py` | Finds the face cam: random screenshots of the stream → Gemini → the box (any side or corner) |
 | `src/chat_spikes/live.py` | Live mode: yt-dlp live chat reader, stream time, real-time detection, reconnects, saving |
 | `src/chat_spikes/detector.py` | Windows, rules, spike detection |
 | `src/chat_spikes/evidence.py` | Free chat evidence per moment: standout words, reaction type, top message |
@@ -379,6 +408,7 @@ The page shows a clear message for each case.
 | `src/chat_spikes/web.py` | Local web server for the pages (`chat-spikes-web`), incl. `/api/live/*`, `/api/library/*` |
 | `src/chat_spikes/webui/` | `app.html` + `app.js` (the window with tabs), `index.html` (start page / new tab, saved streams), `finished.html` + `finished.js`, `live.html` + `live.js`, shared `common.js` (player, chart, moments, why card, chat), `activity.js`, `style.css` |
 | `src/chat_spikes/cli.py` | Command line (`chat-spikes`) |
+| `src/chat_spikes/publish/` | `chat-publish`: queue + `upload_log.json` (`queue.py`), one uploader per platform (`platforms.py`), HTTP/OAuth/secrets (`net.py`), loop and launchd service (`cli.py`) |
 
 ## Maintenance
 

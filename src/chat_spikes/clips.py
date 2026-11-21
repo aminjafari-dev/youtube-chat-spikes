@@ -8,7 +8,9 @@
 The reel is never smaller than what it shows: 1080×1920 from a 1080p source, 1440×2560 from 1440p,
 2160×3840 from 4K, so no part of the source is ever scaled down. Encoding is x264 CRF 10 (visually lossless).
 
-If a channel has no face-cam box yet, the whole reel is the middle of the screen.
+On a stream's first reel, facecam.py sends a few random screenshots to Gemini, which says where the face cam
+is (any side or corner) or that there is none; that box is saved for the stream and the channel.
+If there is still no face-cam box (no Gemini key, no answer), the whole reel is the middle of the screen.
 The face-cam box is saved per channel in data/clip_layouts.json (as parts of the frame, 0..1),
 and can be changed on the page by drawing a box on a frame of the clip.
 
@@ -70,7 +72,8 @@ DEFAULT_LAYOUTS = {
 STEPS = [
     ("queue", "In line", "One reel is made at a time. A reel waits here while another one is being made."),
     ("check", "Check the stream", "Asks yt-dlp if the stream is live now or finished (or still being processed by "
-     "YouTube), and picks the face-cam box for this stream."),
+     "YouTube), and picks the face-cam box for this stream. On a stream's first reel, Gemini looks at a few "
+     "random screenshots and finds where the face cam is (or that there is none)."),
     ("wait", "Wait for the video", "Live only: waits until the end of the clip is on YouTube's live feed "
      "(usually a few seconds after the spike is found)."),
     ("download", "Download the piece", "yt-dlp downloads only these seconds of the video in the best quality "
@@ -731,6 +734,15 @@ def _make(j: dict) -> None:
         with run.step("check") as st:
             j["note"] = "checking the stream…"
             status = live.live_status(vid)
+            from . import facecam
+            if status in ("is_live", "was_live", "not_live") and facecam.needed(vid):
+                # First reel of this stream: Gemini looks at a few random screenshots and finds the face cam.
+                j["note"] = "finding the face cam (Gemini)…"
+                st.detail("finding the face cam: screenshots → Gemini", 0.3)
+                try:
+                    facecam.detect(vid, j["channel"], live=status == "is_live", log=st.log)
+                except Exception as e:  # no key, quota, yt-dlp: the reel is still made with the old layout
+                    st.log(f"face cam check failed: {e}")
             lay = layout_for(j["channel"], vid)
             st.set(stream=status or "unknown", face_cam=lay["face"] or "none", game_box=lay["game"] or "whole screen")
             if status == "post_live":

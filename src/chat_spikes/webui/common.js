@@ -344,10 +344,10 @@ export function createSpikeView(opts) {
       data ||= await (await fetch(`/api/clip/list?v=${v.vid}`)).json();
     } catch { return; }
     if (data.error) return;
-    const before = JSON.stringify(v.clips);
+    const before = JSON.stringify([v.clips, v.clipLayout]);
     v.clips = data.clips || {}; v.clipLayout = data.layout; v.clipChannel = data.channel; v.clipFolder = data.folder;
     if (opts.onClips) opts.onClips(data);
-    if (JSON.stringify(v.clips) !== before) {
+    if (JSON.stringify([v.clips, v.clipLayout]) !== before) {  // a new layout (face cam found) also redraws
       v.renderMoments();
       const sel = v.moments.find((m) => m.peak === v.selected);
       if (sel && !editing) renderClip(sel);
@@ -376,11 +376,24 @@ export function createSpikeView(opts) {
     const face = v.clipLayout && v.clipLayout.face;
     $("clipInfo").textContent = `${clock(s.clip_start)} → ${clock(s.clip_end)}` + (c && c.width ? ` · ${c.width}×${c.height}` : "");
     const layoutNote = face ? `Face cam of <b>${esc(v.clipChannel || "this channel")}</b> on top, the middle of the screen below.`
-      : `No face cam in this stream's reels: only the middle of the screen. If there is a face cam, draw its box on a frame of a reel.`;
+      : `No face cam in this stream's reels: only the middle of the screen. The first reel of a stream asks Gemini where the face cam is; you can also ask now or draw its box on a frame of a reel.`;
+    const findBtn = `<button class="ghostbtn" id="clipFind" title="Sends a few random screenshots of the stream to Gemini, which says where the face cam is (or that there is none)">✨ Find the face cam with AI</button>`;
+    const bindFind = () => {
+      $("clipFind").onclick = async () => {
+        const b = $("clipFind");
+        b.disabled = true;
+        b.textContent = "Finding the face cam… (1–4 min)";
+        try { await clipCall("facecam", {}); }
+        catch (e) { $("clipBody").insertAdjacentHTML("afterbegin", `<p class="err small">${esc(e.message)}</p>`); return; }
+        renderClip(s);
+      };
+    };
     if (!c) {
       body.innerHTML = `<button class="askbtn" id="clipMake">🎬 Make a reel of this moment</button>
-        <p class="muted small">${layoutNote} yt-dlp downloads only these ${Math.round(s.clip_end - s.clip_start)} seconds; ffmpeg makes the reel on your Mac.</p>`;
+        <p class="muted small">${layoutNote} yt-dlp downloads only these ${Math.round(s.clip_end - s.clip_start)} seconds; ffmpeg makes the reel on your Mac.</p>
+        ${findBtn}`;
       $("clipMake").onclick = () => makeClip(s);
+      bindFind();
     } else if (ACTIVE.includes(c.state)) {
       body.innerHTML = `<p class="ai-wait"><span class="spin"></span>${c.state === "queued" ? "In line" : c.state === "waiting" ? "Waiting for the live video" : "Making the reel"}… ${esc(c.note || "")}</p>
         ${clipFlow(c)}`;
@@ -405,6 +418,7 @@ export function createSpikeView(opts) {
             ${c.source ? `<p class="muted small">Source: ${esc(c.source)}</p>` : ""}
             <p class="muted small">${layoutNote}</p>
             <button class="ghostbtn" id="clipBox">${face ? "Change" : "Draw"} the face-cam box</button>
+            ${findBtn}
             <p class="muted small">Saved in <code>${esc(v.clipFolder || "clips")}/${cname(s)}.mp4</code></p>
           </div>
         </div>
@@ -418,6 +432,7 @@ export function createSpikeView(opts) {
       $("clipHookSave").onclick = () => makeClip(s, { hook: $("clipHook").value.trim() });
       $("clipHookNew").onclick = () => makeClip(s, { new_hook: 1 });
       $("clipBox").onclick = () => boxEditor(s, face);
+      bindFind();
     }
   }
 
